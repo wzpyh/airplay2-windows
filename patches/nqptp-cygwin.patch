@@ -1,0 +1,54 @@
+diff --git a/configure.ac b/configure.ac
+index 21b706c..69d9fff 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -27,6 +27,9 @@ case "${host_os}" in
+     darwin*)
+         build_darwin=yes
+         ;;
++    cygwin*)
++        # local patch: Windows via MSYS2/Cygwin POSIX layer
++        ;;
+     *)
+         AC_MSG_ERROR(["OS $host_os is not supported"])
+         ;;
+diff --git a/nqptp-clock-sources.c b/nqptp-clock-sources.c
+index 0ef4b8f..a17502c 100644
+--- a/nqptp-clock-sources.c
++++ b/nqptp-clock-sources.c
+@@ -101,7 +101,7 @@ int get_client_id(char *client_shared_memory_interface_name) {
+           die("failed to set size of shared memory \"%s\".", client_shared_memory_interface_name);
+         }
+ 
+-#if defined(CONFIG_FOR_FREEBSD) || defined(CONFIG_FOR_DARWIN)
++#if defined(CONFIG_FOR_FREEBSD) || defined(CONFIG_FOR_DARWIN) || defined(__CYGWIN__) // local patch: Cygwin
+         clients[i].shared_memory =
+             (struct shm_structure *)mmap(NULL, sizeof(struct shm_structure), PROT_READ | PROT_WRITE,
+                                          MAP_SHARED, clients[i].shm_fd, 0);
+diff --git a/nqptp-utilities.c b/nqptp-utilities.c
+index 1181d76..39f1607 100644
+--- a/nqptp-utilities.c
++++ b/nqptp-utilities.c
+@@ -230,6 +230,22 @@ int get_device_id(uint8_t *id, int *int_length) {
+ #endif
+ #endif
+     }
++#ifdef __CYGWIN__
++    // local patch: Cygwin getifaddrs has no link-layer entries; take the MAC from NQPTP_MAC
++    if (found == 0) {
++      unsigned int m[6];
++      const char *env = getenv("NQPTP_MAC");
++      if (env && sscanf(env, "%x:%x:%x:%x:%x:%x", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5]) == 6) {
++        if ((max_length == 0) || (6 < max_length)) {
++          max_length = 6;
++          *int_length = max_length;
++        }
++        for (i = 0; i < max_length; i++)
++          id[i] = (uint8_t)m[i];
++        found = 1;
++      }
++    }
++#endif
+     if (found != 0)
+       response = 0;
+     freeifaddrs(ifaddr);

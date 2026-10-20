@@ -1,0 +1,5 @@
+sources/
+build/
+dist/
+logs/
+config/shairport-sync.conf

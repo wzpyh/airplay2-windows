@@ -1,0 +1,8 @@
+# name|url  (pinned versions; checksums in SHA256SUMS)
+nqptp.tar.gz|https://github.com/mikebrady/nqptp/archive/ab8fb67483411640fd7f1e193889482f2421c37c.tar.gz
+shairport-sync.tar.gz|https://github.com/mikebrady/shairport-sync/archive/cf6998daa1876c5a8f97128a960c8afc0e731841.tar.gz
+uxplay.tar.gz|https://github.com/FDH2/UxPlay/archive/d9e293da6d5276315af6820d10542a859bbc3424.tar.gz
+libsodium.tar.gz|https://download.libsodium.org/libsodium/releases/libsodium-1.0.22.tar.gz
+libconfig.tar.gz|https://github.com/hyperrealm/libconfig/archive/refs/tags/v1.8.2.tar.gz
+libplist.tar.bz2|https://github.com/libimobiledevice/libplist/releases/download/2.7.0/libplist-2.7.0.tar.bz2
+ffmpeg.tar.xz|https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
