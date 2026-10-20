@@ -60,8 +60,14 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
     -Principal $taskPrincipal -Description "AirPlay 2 receiver '$Name' (airplay2-windows)" -Force | Out-Null
 
+# Stop any running airplay2-windows instance, including one installed in another folder (an
+# upgrade unpacked elsewhere): stopping the task ends service.ps1 but not the programs it started.
+Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" |
+    Where-Object { $_.CommandLine -like '*\runtime\service.ps1*' } |
+    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
 Get-Process nqptp, shairport-sync -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path.StartsWith($bin, [StringComparison]::OrdinalIgnoreCase) } |
+    Where-Object { $_.Path -and (Test-Path (Join-Path (Split-Path (Split-Path (Split-Path $_.Path))) 'runtime\service.ps1')) } |
     Stop-Process -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 1
 Start-ScheduledTask -TaskName $TaskName
 Write-Host "Installed and started '$TaskName'. Pick '$Name' in the AirPlay menu. Logs: $(Join-Path $root 'logs')"
