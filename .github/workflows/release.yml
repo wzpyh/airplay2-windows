@@ -49,10 +49,14 @@ jobs:
           wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
           # MSI versions are numeric: v0.3.0 -> 0.3.0, untagged builds -> 0.0.<run number>
           $v = if ($env:VERSION -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.$env:GITHUB_RUN_NUMBER" }
-          wix build installer/airplay2-windows.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-            -d BundleDir=dist/airplay2-windows -d Version=$v -o "dist/airplay2-windows-$env:VERSION-x64.msi"
+          wix build installer/airplay2-windows.wxs -wx -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
+            -d BundleDir="$PWD\dist\airplay2-windows" -d Version=$v -o "dist/airplay2-windows-$env:VERSION-x64.msi"
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          Get-Item dist/*.msi
+          # BundleDir must be absolute (a relative one resolves against installer/), and a <Files>
+          # wildcard that matches nothing is not an error: check the programs actually went in
+          $msi = Get-Item "dist/airplay2-windows-$env:VERSION-x64.msi"
+          $msi
+          if ($msi.Length -lt 3MB) { throw "MSI is only $($msi.Length) bytes -- the bundle files are missing" }
 
       - name: Sources zip
         run: |

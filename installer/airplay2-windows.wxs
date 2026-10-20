@@ -1,7 +1,7 @@
 <!--
   MSI for the bundle staged by scripts/bundle.sh. Build (WiX 5):
     wix build installer/airplay2-windows.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
-      -d BundleDir=dist/airplay2-windows -d Version=0.3.0 -o airplay2-windows.msi
+      -d BundleDir=<absolute path of dist/airplay2-windows> -d Version=0.3.0 -o airplay2-windows.msi
   The MSI copies the files and then runs install.ps1 (config, firewall rules, boot task) with the
   name and port entered in the setup dialog; uninstalling runs uninstall.ps1.
   Silent install: msiexec /i airplay2-windows.msi /qn NAME="Living Room PC" PORT=7000
