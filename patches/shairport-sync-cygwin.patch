@@ -65,10 +65,10 @@ index 92df9fa..1be2dc3 100644
  #endif
 diff --git a/mdns_winpipe.c b/mdns_winpipe.c
 new file mode 100644
-index 0000000..117dda8
+index 0000000..1d80c10
 --- /dev/null
 +++ b/mdns_winpipe.c
-@@ -0,0 +1,83 @@
+@@ -0,0 +1,112 @@
 +/*
 + * mDNS backend for Windows (Cygwin/MSYS2 builds): hands the service records to an
 + * external native publisher (mdns-pub.exe, built from UxPlay's lib/mdnsd) over a pipe.
@@ -81,11 +81,17 @@ index 0000000..117dda8
 +
 +#include "common.h"
 +#include "mdns.h"
++#include <spawn.h>
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
++#include <sys/wait.h>
++#include <unistd.h>
++
++extern char **environ;
 +
 +static FILE *publisher = NULL;
++static pid_t publisher_pid = -1;
 +static char *saved_ap1name = NULL;
 +static char *saved_ap2name = NULL;
 +static int saved_port = 0;
@@ -122,10 +128,29 @@ index 0000000..117dda8
 +                                 char **secondary_txt_records) {
 +  const char *exe = getenv("SPS_MDNS_PUBLISHER");
 +  if (exe == NULL)
-+    exe = "mdns-pub.exe"; // found via PATH (run.sh puts it there)
-+  publisher = popen(exe, "w");
++    exe = "mdns-pub.exe"; // looked up on PATH
++  // spawn directly (no /bin/sh, so a standalone bundle does not need a shell)
++  int fds[2];
++  if (pipe(fds) != 0) {
++    warn("mdns_winpipe: pipe() failed.");
++    return -1;
++  }
++  posix_spawn_file_actions_t actions;
++  posix_spawn_file_actions_init(&actions);
++  posix_spawn_file_actions_adddup2(&actions, fds[0], STDIN_FILENO);
++  posix_spawn_file_actions_addclose(&actions, fds[1]);
++  char *argv[] = {(char *)exe, NULL};
++  int rc = posix_spawnp(&publisher_pid, exe, &actions, NULL, argv, environ);
++  posix_spawn_file_actions_destroy(&actions);
++  close(fds[0]);
++  if (rc != 0) {
++    close(fds[1]);
++    warn("mdns_winpipe: could not start the publisher \"%s\" (error %d).", exe, rc);
++    return -1;
++  }
++  publisher = fdopen(fds[1], "w");
 +  if (publisher == NULL) {
-+    warn("mdns_winpipe: could not start the publisher \"%s\".", exe);
++    close(fds[1]);
 +    return -1;
 +  }
 +  saved_ap1name = strdup(ap1name);
@@ -140,8 +165,12 @@ index 0000000..117dda8
 +
 +static void mdns_winpipe_unregister(void) {
 +  if (publisher) {
-+    pclose(publisher);
++    fclose(publisher); // EOF makes the publisher send goodbye packets and exit
 +    publisher = NULL;
++  }
++  if (publisher_pid > 0) {
++    waitpid(publisher_pid, NULL, 0);
++    publisher_pid = -1;
 +  }
 +}
 +

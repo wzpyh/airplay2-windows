@@ -6,3 +6,4 @@
 SHA256SUMS    text eol=lf
 sources.list  text eol=lf
 *.conf.in     text eol=lf
+*.yml    text eol=lf

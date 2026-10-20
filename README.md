@@ -23,7 +23,7 @@ It is audio only: no screen mirroring, no AirPlay video.
 ## How it works
 
 ```
-iPhone ──AirPlay 2──▶ shairport-sync ──PCM (stdout)──▶ gst-launch … wasapisink ──▶ default audio device
+iPhone ──AirPlay 2──▶ shairport-sync ──PCM (stdout)──▶ pcm-play.exe (WASAPI) ──▶ default audio device
                          │  ▲
        PTP (UDP 319/320) │  │ shared memory
                          ▼  │
@@ -37,45 +37,45 @@ shairport-sync ──TXT records (pipe)──▶ mdns-pub.exe ──mDNS (UDP 53
 | `nqptp` | Builds as-is once `configure` accepts Cygwin, plus two fixes ([patch](patches/nqptp-cygwin.patch)): the shared-memory block was only `mmap`ed for Linux/FreeBSD/macOS (on any other OS Shairport Sync reports *"The NQPTP service … does not seem to be initialised"*), and the clock identity MAC comes from `NQPTP_MAC` because Cygwin's `getifaddrs()` has no link-layer entries. |
 | `shairport-sync` | `--with-os=cygwin`, and a new mDNS backend `winpipe` ([patch](patches/shairport-sync-cygwin.patch)): there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise the AirPlay 2 service. |
 | `mdns-pub.exe` | Small native publisher built on UxPlay's minimal mDNS responder (`lib/mdnsd`). Reads the records from Shairport Sync over a pipe and answers mDNS queries; sends goodbye packets when the pipe closes. |
-| Audio out | Shairport Sync's `stdout` backend piped into GStreamer's `wasapisink`. |
+| `pcm-play.exe` | Tiny native WASAPI player: Shairport Sync's `stdout` backend is piped into it. Shairport Sync already paces the output against the AirPlay clock, so it just plays what arrives. |
 
-## Requirements
-
-- Windows 10/11 x64
-- [MSYS2](https://www.msys2.org/) installed in `C:\msys64` (another path works; pass `-MsysRoot`)
-- Your home network set to **Private** in Windows (the firewall rules only open the Private profile)
+The release zip is self-contained: the Cygwin/MSYS runtime DLLs ship in `usr\bin`, so the folder
+is its own little MSYS root and nothing else needs to be installed.
 
 ## Install
 
-1. **Get the sources** (any machine with internet; checksums are verified):
-   ```sh
-   bash scripts/fetch.sh
-   ```
-2. **Build** in an *MSYS2 MSYS* shell (not UCRT64/MINGW64). It installs the needed pacman packages,
-   builds libsodium, libconfig, libplist, a minimal FFmpeg, nqptp, shairport-sync and mdns-pub,
-   and installs them into `/usr/local`. Takes a few minutes on a fast CPU; FFmpeg is the slow
-   part and needs a few GB of RAM with many jobs (`JOBS=2 bash scripts/build.sh` on small machines).
-   ```sh
-   bash scripts/build.sh
-   ```
-3. **Install the service** from an elevated PowerShell:
+Requirements: Windows 10/11 x64, and your home network set to **Private** in Windows
+(Settings → Network → your Wi-Fi/Ethernet → Network profile type; the firewall rules only open
+the Private profile).
+
+1. Download `airplay2-windows-<version>-x64.zip` from
+   [Releases](../../releases) and unzip it somewhere permanent, e.g. `C:\Program Files\airplay2-windows`.
+2. Open PowerShell **as Administrator** in that folder and run:
    ```powershell
-   .\install.ps1 -Name "Living Room PC"      # optional: -Port 7000 -MsysRoot C:\msys64
+   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"
    ```
-   This writes `config/shairport-sync.conf`, adds firewall rules, registers a scheduled task
-   `airplay2-windows` that starts at boot as SYSTEM (no logon needed), and starts it.
+   Options: `-Port 7000` (change it if something else, e.g. UxPlay, already uses 7000).
+3. Pick the name in the AirPlay menu on your phone.
 
-Pick the name in the AirPlay menu on your phone. Logs are in `logs/`.
+`install.ps1` writes `config\shairport-sync.conf`, adds firewall rules, and registers a scheduled
+task `airplay2-windows` that starts at boot as SYSTEM (no logon needed) and restarts the receiver
+if it ever exits. Logs are in `logs\`. Re-run it to change the name or port; run `uninstall.ps1`
+(as Administrator) to remove it.
 
-To remove: `.\uninstall.ps1` (elevated).
+## Building from source
 
-### Building on another machine
+Needs [MSYS2](https://www.msys2.org/). In an *MSYS2 MSYS* shell (not UCRT64/MINGW64):
 
-`bash scripts/build.sh package` also writes `dist/airplay2-windows-bin.tgz`. Unpack it into
-`/usr/local` of another MSYS2 install **with the same `msys2-runtime` version**
-(`pacman -Q msys2-runtime`), install the runtime packages there
-(`pacman -S libgcrypt openssl popt libutil-linux mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base`),
-then run `install.ps1`.
+```sh
+bash scripts/fetch.sh     # pinned source tarballs, sha256-checked (any machine with internet)
+bash scripts/build.sh     # installs pacman packages, builds everything, stages dist/airplay2-windows/
+```
+
+`build.sh` builds libsodium, libconfig, libplist, a minimal FFmpeg (AAC/ALAC decoders only), nqptp,
+shairport-sync, mdns-pub and pcm-play, then `scripts/bundle.sh` collects them with the DLLs they
+need, license texts and a third-party notice into `dist/airplay2-windows/` and a zip. FFmpeg is the
+slow part and needs a few GB of RAM with many parallel jobs; use `JOBS=2 bash scripts/build.sh` on
+small machines. Releases are built the same way by GitHub Actions (`.github/workflows/release.yml`).
 
 ## Troubleshooting
 
@@ -83,7 +83,7 @@ then run `install.ps1`.
 | --- | --- |
 | Not listed on the phone | Network profile must be Private. Toggle Wi-Fi on the phone (iOS caches entries). `mdns-pub` must be running. |
 | Listed, connects, no sound | `logs/shairport-sync.log`. If NQPTP is "not initialised", the nqptp patch is missing. |
-| Sound only after a fresh start, silent after pausing | `wasapisink` must have `sync=false` (see the comment in `runtime/run.sh`). |
+| No sound after changing the default audio device | `pcm-play` exits when its device goes away and the service restarts it on the new default within a few seconds; see `logs\restarts.log`. |
 | Port 7000 already in use (e.g. UxPlay) | Re-run `install.ps1 -Port 7010`. Both can run side by side. |
 
 `Can't create a device ID -- no valid MAC address can be found` in the log is harmless:
@@ -94,7 +94,7 @@ Shairport Sync then derives the device ID from the service name.
 | Component | Version |
 | --- | --- |
 | Windows | 11 25H2 (Steam Deck OLED) |
-| MSYS2 | msys2-runtime 3.6.11, gcc 15.3 |
+| MSYS2 (build) | msys2-runtime 3.6.11, gcc 15.3 |
 | shairport-sync | 5.6 (`cf6998d`) |
 | nqptp | 1.2.9 (`ab8fb67`) |
 | UxPlay (mdnsd only) | 1.74 (`d9e293d`) |
@@ -106,5 +106,6 @@ Shairport Sync then derives the device ID from the service name.
 The scripts and `mdns-pub/mdns-pub.c` in this repository are under the [MIT License](LICENSE).
 The patches modify, and are distributed under the licenses of, the projects they apply to:
 nqptp (GPL-2.0) and shairport-sync (see its `LICENSES`). `mdns-pub` is linked with UxPlay's
-`lib/mdnsd` (LGPL-2.1), which is downloaded at build time. No third-party binaries are distributed
-here.
+`lib/mdnsd` (LGPL-2.1). Release zips contain third-party binaries; `THIRD_PARTY.txt` and
+`licenses\` in the zip list them with their licenses, and each release has a matching
+`-sources.zip` with the corresponding source code.

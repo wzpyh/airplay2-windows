@@ -19,7 +19,7 @@ AirPlay 2 **缓冲音频 + PTP 时钟**的接收端发声音，碰到老式接�
 ## 原理
 
 ```
-iPhone ──AirPlay 2──▶ shairport-sync ──PCM(stdout)──▶ gst-launch … wasapisink ──▶ 默认音频设备
+iPhone ──AirPlay 2──▶ shairport-sync ──PCM(stdout)──▶ pcm-play.exe(WASAPI) ──▶ 默认音频设备
                          │  ▲
          PTP(UDP 319/320)│  │ 共享内存
                          ▼  │
@@ -33,53 +33,51 @@ shairport-sync ──TXT 记录(管道)──▶ mdns-pub.exe ──mDNS(UDP 535
 | `nqptp` | 让 `configure` 接受 Cygwin，另修两处（[补丁](patches/nqptp-cygwin.patch)）：共享内存只在 Linux/FreeBSD/macOS 分支里 `mmap`，其他系统上 Shairport Sync 会报 *"The NQPTP service … does not seem to be initialised"*；Cygwin 的 `getifaddrs()` 拿不到网卡 MAC，时钟 ID 改从环境变量 `NQPTP_MAC` 读。 |
 | `shairport-sync` | `--with-os=cygwin`，新增 mDNS 后端 `winpipe`（[补丁](patches/shairport-sync-cygwin.patch)）：Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2 服务。 |
 | `mdns-pub.exe` | 基于 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`）写的原生小程序。通过管道接收 Shairport Sync 的服务记录并应答 mDNS 查询；管道关闭时发送下线包。 |
-| 声音输出 | Shairport Sync 的 `stdout` 后端通过管道送给 GStreamer 的 `wasapisink`。 |
+| `pcm-play.exe` | 很小的原生 WASAPI 播放器，Shairport Sync 的 `stdout` 输出通过管道送给它。Shairport Sync 已经按 AirPlay 时钟控制了输出节奏，它只管收到就播。 |
 
-## 环境要求
-
-- Windows 10/11 x64
-- [MSYS2](https://www.msys2.org/)，装在 `C:\msys64`（装在别处也行，安装时加 `-MsysRoot`）
-- Windows 里家庭网络设为**专用网络（Private）**，防火墙规则只对 Private 放行
+发布的 zip 是自包含的：Cygwin/MSYS 运行库 DLL 放在 `usr\bin` 里，整个文件夹就是一个小型 MSYS 根目录，
+不需要再装任何东西。
 
 ## 安装
 
-1. **下载源码**（任何能上网的机器都行，会校验 sha256）：
-   ```sh
-   bash scripts/fetch.sh
-   ```
-2. **编译**：在 *MSYS2 MSYS* 终端里跑（不是 UCRT64/MINGW64）。脚本会装好需要的 pacman 包，
-   依次编译 libsodium、libconfig、libplist、精简版 FFmpeg、nqptp、shairport-sync、mdns-pub，
-   装到 `/usr/local`。快的 CPU 几分钟就好；FFmpeg 最慢，并行任务多时要吃几 GB 内存，
-   小内存机器用 `JOBS=2 bash scripts/build.sh`。
-   ```sh
-   bash scripts/build.sh
-   ```
-3. **安装为服务**：用管理员 PowerShell 运行
+环境要求：Windows 10/11 x64；Windows 里家庭网络设为**专用网络（Private）**
+（设置 → 网络 → 你的 Wi-Fi/以太网 → 网络配置文件类型），防火墙规则只对 Private 放行。
+
+1. 从 [Releases](../../releases) 下载 `airplay2-windows-<版本>-x64.zip`，解压到一个固定的位置，
+   比如 `C:\Program Files\airplay2-windows`。
+2. 在该文件夹里**以管理员身份**打开 PowerShell，运行：
    ```powershell
-   .\install.ps1 -Name "客厅电脑"      # 可选参数：-Port 7000 -MsysRoot C:\msys64
+   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"
    ```
-   脚本会生成 `config/shairport-sync.conf`、添加防火墙规则、注册计划任务 `airplay2-windows`
-   （开机以 SYSTEM 身份启动，不用登录），并立即启动。
+   可选参数：`-Port 7000`（如果 7000 已经被占用，比如装了 UxPlay，就换一个）。
+3. 在手机的 AirPlay 菜单里选这个名字。
 
-然后在手机的 AirPlay 菜单里选这个名字。日志在 `logs/`。
+`install.ps1` 会生成 `config\shairport-sync.conf`、添加防火墙规则，并注册计划任务 `airplay2-windows`：
+开机以 SYSTEM 身份启动（不用登录），接收端退出时自动重启。日志在 `logs\`。要改名字或端口就重新运行它；
+卸载用管理员身份运行 `uninstall.ps1`。
 
-卸载：用管理员 PowerShell 运行 `.\uninstall.ps1`。
+## 从源码编译
 
-### 在别的机器上编译
+需要 [MSYS2](https://www.msys2.org/)。在 *MSYS2 MSYS* 终端里运行（不是 UCRT64/MINGW64）：
 
-`bash scripts/build.sh package` 会额外生成 `dist/airplay2-windows-bin.tgz`。把它解压到另一份
-MSYS2 的 `/usr/local`，前提是两边 **`msys2-runtime` 版本相同**（`pacman -Q msys2-runtime`）。
-目标机器还要装运行时依赖
-（`pacman -S libgcrypt openssl popt libutil-linux mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base`），
-然后运行 `install.ps1`。
+```sh
+bash scripts/fetch.sh     # 下载锁定版本的源码包并校验 sha256（任何能上网的机器都行）
+bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/airplay2-windows/ 生成绿色包
+```
+
+`build.sh` 依次编译 libsodium、libconfig、libplist、精简版 FFmpeg（只有 AAC/ALAC 解码器）、nqptp、
+shairport-sync、mdns-pub 和 pcm-play，然后由 `scripts/bundle.sh` 把它们连同所需的 DLL、许可证文本和
+第三方声明一起放进 `dist/airplay2-windows/` 并打成 zip。FFmpeg 最慢，并行任务多时要吃几 GB 内存，
+小内存机器用 `JOBS=2 bash scripts/build.sh`。Release 由 GitHub Actions 按同样的流程编译
+（`.github/workflows/release.yml`）。
 
 ## 排障
 
 | 现象 | 检查 |
 | --- | --- |
 | 手机上看不到 | 网络必须是 Private；iPhone 会缓存列表，关开一次 Wi-Fi；`mdns-pub` 进程要在。 |
-| 能看到、能连上，但没声音 | 看 `logs/shairport-sync.log`。如果报 NQPTP "not initialised"，说明 nqptp 补丁没打上。 |
-| 刚启动时有声音，暂停或切 App 后就没了 | `wasapisink` 必须是 `sync=false`（原因见 `runtime/run.sh` 里的注释）。 |
+| 能看到、能连上，但没声音 | 看 `logs\shairport-sync.log`。如果报 NQPTP "not initialised"，说明 nqptp 补丁没打上。 |
+| 换了默认音频设备后没声音 | 设备消失时 `pcm-play` 会退出，服务几秒内会在新的默认设备上重启它；看 `logs\restarts.log`。 |
 | 7000 端口被占用（比如装了 UxPlay） | 重新运行 `install.ps1 -Port 7010`，两个可以并存。 |
 
 日志里的 `Can't create a device ID -- no valid MAC address can be found` 不影响使用：
@@ -90,7 +88,7 @@ Shairport Sync 会改用服务名生成设备 ID。
 | 组件 | 版本 |
 | --- | --- |
 | Windows | 11 25H2（Steam Deck OLED） |
-| MSYS2 | msys2-runtime 3.6.11，gcc 15.3 |
+| MSYS2（编译） | msys2-runtime 3.6.11，gcc 15.3 |
 | shairport-sync | 5.6（`cf6998d`） |
 | nqptp | 1.2.9（`ab8fb67`） |
 | UxPlay（只用 mdnsd） | 1.74（`d9e293d`） |
@@ -101,4 +99,5 @@ Shairport Sync 会改用服务名生成设备 ID。
 
 本仓库的脚本和 `mdns-pub/mdns-pub.c` 采用 [MIT 许可证](LICENSE)。补丁修改的是对应的上游项目，
 按上游的许可证发布：nqptp（GPL-2.0）、shairport-sync（见其 `LICENSES`）。`mdns-pub` 链接 UxPlay 的
-`lib/mdnsd`（LGPL-2.1），编译时下载。本仓库不分发任何第三方二进制文件。
+`lib/mdnsd`（LGPL-2.1）。Release 的 zip 里包含第三方二进制文件，zip 内的 `THIRD_PARTY.txt` 和
+`licenses\` 列出了它们及各自的许可证；每个 Release 都附有对应的 `-sources.zip`，内含相应源码。

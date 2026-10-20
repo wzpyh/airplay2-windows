@@ -4,10 +4,8 @@
 #   Run from an "MSYS2 MSYS" shell (not UCRT64/MINGW64): nqptp and shairport-sync need the
 #   POSIX layer (fork, shm_open, mmap). mdns-pub is built natively with the UCRT64 compiler.
 #
-#   scripts/build.sh            install packages, build everything, install into /usr/local
-#   scripts/build.sh package    additionally write dist/airplay2-windows-bin.tgz, which can be
-#                               unpacked into /usr/local of another MSYS2 install with the
-#                               same msys2-runtime version
+#   scripts/build.sh    install packages, build everything into /usr/local, then stage a
+#                       standalone bundle in dist/ (scripts/bundle.sh) that runs without MSYS2
 #
 # Sources come from ../sources (see fetch.sh); nothing is downloaded here except pacman packages.
 set -euo pipefail
@@ -33,7 +31,7 @@ step "checking sources"
 
 step "installing MSYS2 packages"
 pacman -S --needed --noconfirm \
-  autotools gcc make pkgconf diffutils tar xz flex bison texinfo vim patch \
+  autotools gcc make pkgconf diffutils tar xz flex bison texinfo vim patch libarchive git \
   libutil-linux-devel libgcrypt-devel openssl-devel popt-devel \
   mingw-w64-ucrt-x86_64-gcc \
   mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base >/dev/null
@@ -84,12 +82,9 @@ PATH="/ucrt64/bin:$PATH" /ucrt64/bin/gcc -O2 -Wall -static -o $prefix/bin/mdns-p
   "$root/mdns-pub/mdns-pub.c" uxplay/lib/mdnsd/mdnsd.c -Iuxplay/lib -Iuxplay/lib/mdnsd -lws2_32 -liphlpapi \
   > mdns-pub.log 2>&1 || { log mdns-pub.log; exit 1; }
 
-step "done"
-shairport-sync -V
-ls -l $prefix/bin/{nqptp,shairport-sync,mdns-pub}.exe
+step "pcm-play (native, UCRT64)"
+PATH="/ucrt64/bin:$PATH" /ucrt64/bin/gcc -O2 -Wall -static -o $prefix/bin/pcm-play.exe   "$root/pcm-play/pcm-play.c" -lole32 > pcm-play.log 2>&1 || { log pcm-play.log; exit 1; }
 
-if [ "${1:-}" = "package" ]; then
-  mkdir -p "$root/dist"
-  (cd $prefix && tar czf "$root/dist/airplay2-windows-bin.tgz" bin lib)
-  echo "package: $root/dist/airplay2-windows-bin.tgz (msys2-runtime $(pacman -Q msys2-runtime | cut -d' ' -f2))"
-fi
+step "bundle"
+shairport-sync -V
+bash "$here/bundle.sh"

@@ -1,0 +1,70 @@
+name: build
+
+# Builds the standalone bundle on every push and pull request.
+# Pushing a tag v* also creates a *draft* GitHub release with the bundle and a sources zip
+# (everything needed to rebuild it, including the MSYS2 source packages of the shipped DLLs).
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MSYS
+          update: true
+          install: git curl zip
+
+      - name: Version
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then v="$GITHUB_REF_NAME"; else v="ci-${GITHUB_SHA::7}"; fi
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Fetch sources
+        run: bash scripts/fetch.sh
+
+      - name: Build and bundle
+        run: bash scripts/build.sh
+
+      - name: Sources zip
+        run: |
+          s="dist/airplay2-windows-$VERSION-sources"
+          mkdir -p "$s/upstream" "$s/msys2"
+          cp sources/* "$s/upstream/"
+          git archive --format=tar --prefix=airplay2-windows/ HEAD | tar x -C "$s"
+          while read -r f; do
+            curl -fsSL --retry 3 -o "$s/msys2/$f" "https://repo.msys2.org/msys/sources/$f"
+          done < dist/msys2-sources.txt
+          (cd dist && zip -qr "airplay2-windows-$VERSION-sources.zip" "airplay2-windows-$VERSION-sources")
+          ls -l dist/*.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: airplay2-windows-${{ env.VERSION }}
+          path: |
+            dist/airplay2-windows-*-x64.zip
+            dist/airplay2-windows-*-sources.zip
+
+      - name: Draft release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          files: |
+            dist/airplay2-windows-${{ env.VERSION }}-x64.zip
+            dist/airplay2-windows-${{ env.VERSION }}-sources.zip
