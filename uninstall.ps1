@@ -1,5 +1,7 @@
 # Removes the scheduled task and firewall rules created by install.ps1 and stops the receiver.
-# The folder itself is left in place; delete it afterwards if you like.
+# The folder itself is left in place; delete it afterwards if you like. -Purge also deletes what
+# the receiver wrote into it (config, saved volume, logs); the MSI uses that on a full uninstall.
+param([switch]$Purge)
 $ErrorActionPreference = 'Stop'
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -15,4 +17,10 @@ Get-NetFirewallRule -DisplayName 'airplay2-windows *' -ErrorAction SilentlyConti
 Get-Process nqptp, shairport-sync -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($bin, [StringComparison]::OrdinalIgnoreCase) } |
     Stop-Process -Force -ErrorAction SilentlyContinue
+if ($Purge) {
+    Start-Sleep -Seconds 1   # let the stopped programs release their log files
+    foreach ($p in 'config\shairport-sync.conf', 'config\volume.txt', 'logs', 'dev', 'tmp') {
+        Remove-Item (Join-Path $PSScriptRoot $p) -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
 Write-Host 'Uninstalled.'

@@ -1,0 +1,112 @@
+<!--
+  MSI for the bundle staged by scripts/bundle.sh. Build (WiX 5):
+    wix build installer/airplay2-windows.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
+      -d BundleDir=dist/airplay2-windows -d Version=0.3.0 -o airplay2-windows.msi
+  The MSI copies the files and then runs install.ps1 (config, firewall rules, boot task) with the
+  name and port entered in the setup dialog; uninstalling runs uninstall.ps1.
+  Silent install: msiexec /i airplay2-windows.msi /qn NAME="Living Room PC" PORT=7000
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="airplay2-windows" Manufacturer="airplay2-windows" Version="$(Version)"
+           UpgradeCode="2b2c5592-cdd2-4a17-9726-18b4a33a701b" Scope="perMachine" Compressed="yes">
+    <MajorUpgrade DowngradeErrorMessage="A newer version of airplay2-windows is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/wzpyh/airplay2-windows" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <!-- the receiver runs hidden in session 0, there is no window for Restart Manager to close -->
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
+
+    <!-- Name and port: command line, else the values of the previous install, else defaults -->
+    <Property Id="PREVNAME">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Name" Type="raw" />
+    </Property>
+    <Property Id="PREVPORT">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Port" Type="raw" />
+    </Property>
+    <SetProperty Id="NAME" Action="SetNameFromPrevious" Value="[PREVNAME]" After="AppSearch" Sequence="both" Condition="NOT NAME AND PREVNAME" />
+    <SetProperty Id="PORT" Action="SetPortFromPrevious" Value="[PREVPORT]" After="AppSearch" Sequence="both" Condition="NOT PORT AND PREVPORT" />
+    <SetProperty Id="NAME" Action="SetNameDefault" Value="[ComputerName] AirPlay" Before="CostInitialize" Sequence="both" Condition="NOT NAME" />
+    <SetProperty Id="PORT" Action="SetPortDefault" Value="7000" Before="CostInitialize" Sequence="both" Condition="NOT PORT" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="airplay2-windows" />
+    </StandardDirectory>
+
+    <ComponentGroup Id="BundleFiles" Directory="INSTALLFOLDER">
+      <Files Include="$(BundleDir)\**" />
+      <Component Id="Settings">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Name" Type="string" Value="[NAME]" KeyPath="yes" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Port" Type="string" Value="[PORT]" />
+      </Component>
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="BundleFiles" />
+    </Feature>
+
+    <!-- install.ps1 / uninstall.ps1 as SYSTEM; output goes to the MSI log -->
+    <SetProperty Id="RunInstall" Before="RunInstall" Sequence="execute"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Name &quot;[NAME]&quot; -Port [PORT]" />
+    <CustomAction Id="RunInstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="check" />
+    <!-- full uninstall also deletes what the receiver wrote (config, volume, logs); an upgrade keeps it -->
+    <SetProperty Id="RunUninstall" Before="RunUninstall" Sequence="execute"
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]uninstall.ps1&quot; [PURGE]" />
+    <SetProperty Id="PURGE" Value="-Purge" After="InstallInitialize" Sequence="execute" Condition="NOT UPGRADINGPRODUCTCODE" />
+    <CustomAction Id="RunUninstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
+                  Execute="deferred" Impersonate="no" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="RunUninstall" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="RunInstall" Before="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <UI Id="AirPlayUI">
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Segoe UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Segoe UI" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Segoe UI" Size="9" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="MsiRMFilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+
+      <Dialog Id="NameDlg" Width="370" Height="270" Title="[ProductName] Setup">
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.InstallDirDlgBannerBitmap)" />
+        <Control Id="Title" Type="Text" X="15" Y="6" Width="200" Height="15" Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Title}Receiver name" />
+        <Control Id="Description" Type="Text" X="25" Y="23" Width="280" Height="15" Transparent="yes" NoPrefix="yes" Text="How this PC shows up in the AirPlay menu on your iPhone, iPad or Mac." />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="NameLabel" Type="Text" X="20" Y="60" Width="320" Height="12" Text="&amp;Name:" />
+        <Control Id="NameEdit" Type="Edit" X="20" Y="74" Width="320" Height="18" Property="NAME" Text="{63}" />
+        <Control Id="PortLabel" Type="Text" X="20" Y="104" Width="320" Height="12" Text="&amp;Port (change it if another AirPlay receiver such as UxPlay already uses 7000):" />
+        <Control Id="PortEdit" Type="Edit" X="20" Y="118" Width="60" Height="18" Property="PORT" Text="{5}" />
+        <Control Id="Note" Type="Text" X="20" Y="150" Width="320" Height="40" NoPrefix="yes" Text="The receiver starts at boot without logging in. Your home network must be set to Private in Windows (Settings, Network, Network profile type)." />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+        <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
+        <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />
+        <Control Id="Cancel" Type="PushButton" X="304" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+      </Dialog>
+
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="NameDlg" Condition="NOT Installed" />
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="Installed AND PATCH" />
+      <Publish Dialog="NameDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" />
+      <Publish Dialog="NameDlg" Control="Next" Event="NewDialog" Value="VerifyReadyDlg" Condition="NAME AND PORT" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="NameDlg" Condition="NOT Installed" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="MaintenanceTypeDlg" Condition="Installed AND NOT PATCH" />
+      <Publish Dialog="VerifyReadyDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Condition="Installed AND PATCH" />
+      <Publish Dialog="MaintenanceWelcomeDlg" Control="Next" Event="NewDialog" Value="MaintenanceTypeDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RepairButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="RemoveButton" Event="NewDialog" Value="VerifyReadyDlg" />
+      <Publish Dialog="MaintenanceTypeDlg" Control="Back" Event="NewDialog" Value="MaintenanceWelcomeDlg" />
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return" Order="999" />
+    </UI>
+    <UIRef Id="WixUI_Common" />
+  </Package>
+</Wix>

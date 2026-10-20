@@ -57,18 +57,20 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后�
 环境要求：Windows 10/11 x64；Windows 里家庭网络设为**专用网络（Private）**
 （设置 → 网络 → 你的 Wi-Fi/以太网 → 网络配置文件类型），防火墙规则只对 Private 放行。
 
-1. 从 [Releases](../../releases) 下载 `airplay2-windows-<版本>-x64.zip`，解压到一个固定的位置，
-   比如 `C:\Program Files\airplay2-windows`。
-2. 在该文件夹里**以管理员身份**打开 PowerShell，运行：
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"
-   ```
-   可选参数：`-Port 7000`（如果 7000 已经被占用，比如装了 UxPlay，就换一个）。
-3. 在手机的 AirPlay 菜单里选这个名字。
+从 [Releases](../../releases) 下载 `airplay2-windows-<版本>-x64.msi` 双击安装。安装向导会让你填
+AirPlay 菜单里显示的名字和端口（7000 被占用时换一个，比如装了 UxPlay），装到
+`C:\Program Files\airplay2-windows` 并启动接收端。然后在手机的 AirPlay 菜单里选这个名字。
 
+安装包没有代码签名，SmartScreen 可能提示"未知发布者"：点*更多信息 → 仍要运行*。升级时名字、端口和音量
+都会保留；卸载在*设置 → 应用*里。静默安装：
+`msiexec /i airplay2-windows-<版本>-x64.msi /qn NAME="客厅电脑" PORT=7000`。
+
+**绿色版 zip**（不用安装包）：把 `airplay2-windows-<版本>-x64.zip` 解压到一个固定的位置，在该文件夹里
+**以管理员身份**打开 PowerShell，运行
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"`（可选参数 `-Port`）。
 `install.ps1` 会生成 `config\shairport-sync.conf`、添加防火墙规则，并注册计划任务 `airplay2-windows`：
 开机以 SYSTEM 身份启动（不用登录），接收端退出时自动重启。日志在 `logs\`。要改名字或端口就重新运行它；
-卸载用管理员身份运行 `uninstall.ps1`。
+卸载用管理员身份运行 `uninstall.ps1`。MSI 内部调用的也是这两个脚本。
 
 ## 从源码编译
 
@@ -82,7 +84,8 @@ bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/ai
 `build.sh` 依次编译 libsodium、libconfig、libplist、精简版 FFmpeg（只有 AAC/ALAC 解码器）、nqptp、
 以及带 WASAPI 和内置 mDNS 后端的 shairport-sync，然后由 `scripts/bundle.sh` 把它们连同所需的 DLL、许可证文本和
 第三方声明一起放进 `dist/airplay2-windows/` 并打成 zip。FFmpeg 最慢，并行任务多时要吃几 GB 内存，
-小内存机器用 `JOBS=2 bash scripts/build.sh`。Release 由 GitHub Actions 按同样的流程编译
+小内存机器用 `JOBS=2 bash scripts/build.sh`。MSI 由 [WiX 5](https://wixtoolset.org/) 用这个文件夹打包
+（`installer/airplay2-windows.wxs`，编译命令写在文件开头）。Release 由 GitHub Actions 按同样的流程编译
 （`.github/workflows/release.yml`）。
 
 ## 排障

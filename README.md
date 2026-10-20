@@ -62,19 +62,23 @@ Requirements: Windows 10/11 x64, and your home network set to **Private** in Win
 (Settings → Network → your Wi-Fi/Ethernet → Network profile type; the firewall rules only open
 the Private profile).
 
-1. Download `airplay2-windows-<version>-x64.zip` from
-   [Releases](../../releases) and unzip it somewhere permanent, e.g. `C:\Program Files\airplay2-windows`.
-2. Open PowerShell **as Administrator** in that folder and run:
-   ```powershell
-   powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"
-   ```
-   Options: `-Port 7000` (change it if something else, e.g. UxPlay, already uses 7000).
-3. Pick the name in the AirPlay menu on your phone.
+Download `airplay2-windows-<version>-x64.msi` from [Releases](../../releases) and run it. Setup
+asks for the name shown in the AirPlay menu and the port (change it from 7000 if something else,
+e.g. UxPlay, already uses it), installs to `C:\Program Files\airplay2-windows` and starts the
+receiver. Then pick the name in the AirPlay menu on your phone.
 
+Windows SmartScreen may warn about an unknown publisher (the installer is not code-signed):
+*More info → Run anyway*. Upgrades keep the name, port and volume; uninstall it from
+*Settings → Apps*. Unattended install:
+`msiexec /i airplay2-windows-<version>-x64.msi /qn NAME="Living Room PC" PORT=7000`.
+
+**Portable zip** (no installer): unzip `airplay2-windows-<version>-x64.zip` somewhere permanent,
+open PowerShell **as Administrator** in that folder and run
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"` (option `-Port`).
 `install.ps1` writes `config\shairport-sync.conf`, adds firewall rules, and registers a scheduled
 task `airplay2-windows` that starts at boot as SYSTEM (no logon needed) and restarts the receiver
 if it ever exits. Logs are in `logs\`. Re-run it to change the name or port; run `uninstall.ps1`
-(as Administrator) to remove it.
+(as Administrator) to remove it. The MSI runs these same two scripts.
 
 ## Building from source
 
@@ -89,7 +93,9 @@ bash scripts/build.sh     # installs pacman packages, builds everything, stages 
 and shairport-sync (with the WASAPI and built-in mDNS backends), then `scripts/bundle.sh` collects them with the DLLs they
 need, license texts and a third-party notice into `dist/airplay2-windows/` and a zip. FFmpeg is the
 slow part and needs a few GB of RAM with many parallel jobs; use `JOBS=2 bash scripts/build.sh` on
-small machines. Releases are built the same way by GitHub Actions (`.github/workflows/release.yml`).
+small machines. The MSI is made from that folder with [WiX 5](https://wixtoolset.org/)
+(`installer/airplay2-windows.wxs`; the build command is at the top of it). Releases are built the
+same way by GitHub Actions (`.github/workflows/release.yml`).
 
 ## Troubleshooting
 

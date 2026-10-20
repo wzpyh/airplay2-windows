@@ -10,7 +10,10 @@ $root = Split-Path $PSScriptRoot -Parent
 $bin = Join-Path $root 'usr\bin'
 $logs = Join-Path $root 'logs'
 $conf = Join-Path $root 'config\shairport-sync.conf'
-New-Item -ItemType Directory -Force $logs | Out-Null
+# logs, plus the Cygwin /dev/shm (nqptp's shared memory) and /tmp, which the MSI does not create
+foreach ($d in $logs, (Join-Path $root 'dev\shm'), (Join-Path $root 'tmp')) {
+    New-Item -ItemType Directory -Force $d | Out-Null
+}
 
 if (-not (Test-Path $conf)) { throw "missing $conf -- run install.ps1 first" }
 

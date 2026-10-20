@@ -1,7 +1,7 @@
 name: build
 
 # Builds the standalone bundle on every push and pull request.
-# Pushing a tag v* also creates a *draft* GitHub release with the bundle and a sources zip
+# Pushing a tag v* also creates a *draft* GitHub release with the MSI, the bundle zip and a sources zip
 # (everything needed to rebuild it, including the MSYS2 source packages of the shipped DLLs).
 on:
   push:
@@ -41,6 +41,19 @@ jobs:
       - name: Build and bundle
         run: bash scripts/build.sh
 
+      - name: MSI
+        shell: pwsh
+        run: |
+          $env:PATH += ";$env:USERPROFILE\.dotnet\tools"
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2
+          # MSI versions are numeric: v0.3.0 -> 0.3.0, untagged builds -> 0.0.<run number>
+          $v = if ($env:VERSION -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.$env:GITHUB_RUN_NUMBER" }
+          wix build installer/airplay2-windows.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
+            -d BundleDir=dist/airplay2-windows -d Version=$v -o "dist/airplay2-windows-$env:VERSION-x64.msi"
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-Item dist/*.msi
+
       - name: Sources zip
         run: |
           s="dist/airplay2-windows-$VERSION-sources"
@@ -62,6 +75,12 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
+          name: airplay2-windows-${{ env.VERSION }}-x64-msi
+          path: dist/airplay2-windows-${{ env.VERSION }}-x64.msi
+          compression-level: 0
+
+      - uses: actions/upload-artifact@v4
+        with:
           name: airplay2-windows-${{ env.VERSION }}-sources
           path: dist/airplay2-windows-${{ env.VERSION }}-sources.zip
           compression-level: 0
@@ -72,5 +91,6 @@ jobs:
         with:
           draft: true
           files: |
+            dist/airplay2-windows-${{ env.VERSION }}-x64.msi
             dist/airplay2-windows-${{ env.VERSION }}-x64.zip
             dist/airplay2-windows-${{ env.VERSION }}-sources.zip
