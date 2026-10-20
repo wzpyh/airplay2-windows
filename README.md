@@ -10,16 +10,30 @@ whatever Windows audio device is the default.
 
 ## Why
 
-Free Windows receivers such as UxPlay speak the older real-time AirPlay audio protocol. Many
-iOS **video apps** only send sound to receivers that support AirPlay 2 *buffered audio* with
-*PTP timing*; with an older receiver they stream silence. With this receiver:
+AirPlay 2 audio comes in two forms. *Real-time* audio (stream type 96, NTP timing) is played as it
+arrives; *buffered* audio (type 103, PTP timing) is sent seconds ahead and played at exact clock
+anchors, which is what iOS uses to keep sound in sync with video. Many iOS **video apps** only
+send sound to receivers that advertise buffered audio and PTP (AirPlay features bits 40 and 41);
+to a receiver without them they stream silence.
 
-- video apps (tested: Bilibili, YouTube) play sound, **in sync with the picture**
-  on the phone (the video stays on the phone);
-- music apps (Apple Music) work as usual;
-- the last volume is remembered across restarts (`config\volume.txt`).
+[UxPlay](https://github.com/FDH2/UxPlay), the best-known free receiver for Windows, implements
+AirPlay 2 screen mirroring and real-time audio, but not buffered audio or PTP. This project adds
+that missing half, so your PC behaves like an AirPlay 2 speaker (HomePod-style):
 
-It is audio only: no screen mirroring, no AirPlay video.
+| | UxPlay | airplay2-windows |
+| --- | --- | --- |
+| Shows up in iOS as | Apple TV | Speaker |
+| Screen mirroring | ✅ | ❌ |
+| AirPlay video | YouTube only (HLS) | ❌ (the video stays on the phone) |
+| Music apps (Apple Music, …) | ✅ | ✅ |
+| Video apps' sound (tested: Bilibili, YouTube) | Silent in some apps (e.g. Bilibili) | ✅ in sync with the picture |
+| AirPlay 2 buffered audio + PTP timing | ❌ | ✅ |
+| Remembers volume across restarts | ❌ | ✅ (`config\volume.txt`) |
+| Runs at boot without logging in | Do it yourself | ✅ (scheduled task as SYSTEM) |
+| Runtime dependencies | GStreamer, Bonjour (≤1.73) | None (one folder, ~16 MB) |
+
+They complement each other and can be installed side by side: give this one another port with
+`install.ps1 -Port 7010`. (Comparison as of UxPlay 1.73/1.74, October 2026.)
 
 ## How it works
 

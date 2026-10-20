@@ -8,14 +8,28 @@
 
 ## 为什么做这个
 
-UxPlay 等免费的 Windows 接收端只支持老式的实时 AirPlay 音频。很多 iOS **视频 App** 只会给支持
-AirPlay 2 **缓冲音频 + PTP 时钟**的接收端发声音，碰到老式接收端就只发静音。用这个接收端：
+AirPlay 2 的音频有两种传法。**实时音频**（流类型 96，NTP 时钟）是收到就播；**缓冲音频**（类型 103，
+PTP 时钟）会提前几秒发过来，按精确的时钟锚点播放，iOS 就是靠它让声音和视频画面对齐。很多 iOS
+**视频 App** 只会给声明了缓冲音频和 PTP 的接收端（AirPlay 能力位第 40、41 位）发声音，碰到没有声明的
+接收端就只发静音。
 
-- 视频 App（实测 B 站、YouTube）有声音，而且**和手机上的画面同步**（视频留在手机上播）；
-- 音乐 App（Apple Music）照常可用；
-- 重启后会记住上次的音量（保存在 `config\volume.txt`）。
+Windows 上最有名的免费接收端 [UxPlay](https://github.com/FDH2/UxPlay) 实现了 AirPlay 2 的屏幕镜像和
+实时音频，但没有缓冲音频和 PTP。本项目补上的就是这一半，让电脑像一个 AirPlay 2 音箱（类似 HomePod）：
 
-只有音频，不支持屏幕镜像和 AirPlay 视频。
+| | UxPlay | airplay2-windows |
+| --- | --- | --- |
+| 在 iOS 里显示为 | Apple TV | 音箱 |
+| 屏幕镜像 | ✅ | ❌ |
+| AirPlay 视频 | 仅 YouTube（HLS） | ❌（视频留在手机上播） |
+| 音乐 App（Apple Music 等） | ✅ | ✅ |
+| 视频 App 的声音（实测 B 站、YouTube） | 部分 App 没声音（如 B 站） | ✅ 且与画面同步 |
+| AirPlay 2 缓冲音频 + PTP 时钟 | ❌ | ✅ |
+| 重启后记住音量 | ❌ | ✅（`config\volume.txt`） |
+| 开机自启、不用登录 | 需要自己配置 | ✅（以 SYSTEM 身份运行的计划任务） |
+| 运行时依赖 | GStreamer、Bonjour（1.73 及以前） | 无（一个文件夹，约 16 MB） |
+
+两者是互补的，可以同时安装：用 `install.ps1 -Port 7010` 给本项目换个端口即可。
+（对比基于 UxPlay 1.73/1.74，2026 年 10 月。）
 
 ## 原理
 
