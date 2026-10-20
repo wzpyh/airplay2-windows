@@ -4,3 +4,4 @@ dist/
 logs/
 config/shairport-sync.conf
 *.exe
+config/volume.txt

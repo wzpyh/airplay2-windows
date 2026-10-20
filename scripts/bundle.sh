@@ -7,7 +7,7 @@
 #   install.ps1  uninstall.ps1  README.md  README.zh-CN.md  LICENSE  THIRD_PARTY.txt
 #   config/shairport-sync.conf.in
 #   runtime/service.ps1
-#   usr/bin/      nqptp.exe shairport-sync.exe mdns-pub.exe pcm-play.exe + DLLs
+#   usr/bin/      nqptp.exe shairport-sync.exe + DLLs
 #   dev/shm/ tmp/ logs/
 #   licenses/     license texts of everything shipped in usr/bin
 set -euo pipefail
@@ -25,11 +25,11 @@ cp "$root/runtime/service.ps1" "$out/runtime/"
 touch "$out/dev/shm/.keep" "$out/tmp/.keep" "$out/logs/.keep"
 
 # Programs
-for exe in nqptp shairport-sync mdns-pub pcm-play; do
+for exe in nqptp shairport-sync; do
   cp "/usr/local/bin/$exe.exe" "$out/usr/bin/"
 done
 
-# DLLs the Cygwin programs need (mdns-pub and pcm-play are static native builds)
+# DLLs the programs need
 dlls=$(for exe in nqptp shairport-sync; do ldd "/usr/local/bin/$exe.exe"; done \
   | awk '$3 ~ "^/usr/" {print $3}' | sort -u)
 for dll in $dlls; do cp "$dll" "$out/usr/bin/"; done

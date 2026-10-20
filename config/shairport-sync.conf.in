@@ -2,11 +2,6 @@
 general = {
   name = "@NAME@";
   port = @PORT@;
-  output_backend = "stdout";   // raw PCM to stdout, played by GStreamer (see runtime/run.sh)
-  mdns_backend = "winpipe";    // advertised by mdns-pub.exe (patches/shairport-sync-cygwin.patch)
-};
-
-stdout = {
-  output_format = "S16_LE";    // must match the rawaudioparse caps in runtime/run.sh
-  output_rate = 44100;
+  output_backend = "wasapi";   // default Windows audio device (patches/shairport-sync-windows.patch)
+  mdns_backend = "uxmdnsd";    // built-in mDNS responder (UxPlay lib/mdnsd)
 };

@@ -1,0 +1,575 @@
+diff --git a/Makefile.am b/Makefile.am
+index 5c7f214..771368c 100644
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -95,6 +95,14 @@ if USE_EXTERNAL_MDNS
+ shairport_sync_SOURCES += mdns_external.c
+ endif
+ 
++if USE_UXMDNSD
++shairport_sync_SOURCES += mdns_uxmdnsd.c uxplay/mdnsd/mdnsd.c
++endif
++
++if USE_WASAPI
++shairport_sync_SOURCES += audio_wasapi.c
++endif
++
+ if USE_ALSA
+ shairport_sync_SOURCES += audio_alsa.c
+ endif
+diff --git a/audio.c b/audio.c
+index 64aaeca..e6416b7 100644
+--- a/audio.c
++++ b/audio.c
+@@ -58,8 +58,14 @@ extern audio_output audio_pipe;
+ #ifdef CONFIG_STDOUT
+ extern audio_output audio_stdout;
+ #endif
++#ifdef CONFIG_WASAPI
++extern audio_output audio_wasapi;
++#endif
+ 
+ static audio_output *outputs[] = {
++#ifdef CONFIG_WASAPI
++    &audio_wasapi,
++#endif
+ #ifdef CONFIG_COREAUDIO
+     &audio_coreaudio,
+ #endif
+diff --git a/audio.h b/audio.h
+index 2ad6e1b..0aac105 100644
+--- a/audio.h
++++ b/audio.h
+@@ -107,6 +107,13 @@ int32_t search_for_suitable_configuration(
+ 
+ audio_output *audio_get_output(const char *name);
+ void audio_ls_outputs(void);
++
++#ifdef CONFIG_WASAPI
++// local patch (airplay2-windows): persist the AirPlay volume in the file named by
++// SPS_VOLUME_FILE so it survives restarts; no-ops if the variable is not set
++void wasapi_save_volume(double airplay_volume);
++void wasapi_load_volume(double *airplay_volume);
++#endif
+ void parse_audio_options(const char *named_stanza, uint32_t default_format_set,
+                          uint32_t default_rate_set,
+                          uint32_t default_channel_set); // look in "general" and in the named stanza
+diff --git a/audio_wasapi.c b/audio_wasapi.c
+new file mode 100644
+index 0000000..75bcaf5
+--- /dev/null
++++ b/audio_wasapi.c
+@@ -0,0 +1,300 @@
++/*
++ * WASAPI (Windows) output backend for Shairport Sync, for Cygwin/MSYS2 builds.
++ * Local patch from airplay2-windows -- not part of upstream Shairport Sync.
++ *
++ * Plays to the default render device in shared mode. The engine converts the stream to the
++ * device mix format (AUTOCONVERTPCM), so only S16_LE/S32_LE stereo at 44.1/48 kHz is offered.
++ * delay() reports frames still queued in the endpoint buffer plus the stream latency, which is
++ * what Shairport Sync needs to keep output in sync with the AirPlay (PTP) clock.
++ * If the device goes away (unplugged, default changed), the next play() reopens the current
++ * default device.
++ *
++ * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
++ * and associated documentation files (the "Software"), to deal in the Software without
++ * restriction, including without limitation the rights to use, copy, modify, merge, publish,
++ * distribute, sublicense, and/or sell copies of the Software, and to permit persons to whom the
++ * Software is furnished to do so, subject to the following conditions: the above copyright notice
++ * and this permission notice shall be included in all copies or substantial portions of the
++ * Software. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
++ */
++
++#include "audio.h"
++#include "common.h"
++#include <errno.h>
++#include <pthread.h>
++#include <string.h>
++#include <unistd.h>
++
++#define COBJMACROS
++#include <windows.h>
++#include <initguid.h>
++#include <audioclient.h>
++#include <mmdeviceapi.h>
++
++DEFINE_GUID(sps_CLSID_MMDeviceEnumerator, 0xBCDE0395, 0xE52F, 0x467C, 0x8E, 0x3D, 0xC4, 0x57, 0x92,
++            0x91, 0x69, 0x2E);
++DEFINE_GUID(sps_IID_IMMDeviceEnumerator, 0xA95664D2, 0x9614, 0x4F35, 0xA7, 0x46, 0xDE, 0x8D, 0xB6,
++            0x36, 0x17, 0xE6);
++DEFINE_GUID(sps_IID_IAudioClient, 0x1CB9AD4C, 0xDBFA, 0x4C32, 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7,
++            0x03, 0xB2);
++DEFINE_GUID(sps_IID_IAudioRenderClient, 0xF294ACFC, 0x3146, 0x4483, 0xA7, 0xBF, 0xAD, 0xDC, 0xA7,
++            0xC2, 0x60, 0xE2);
++
++#define DEVICE_BUFFER_SECONDS 1.0
++
++static pthread_mutex_t wasapi_mutex = PTHREAD_MUTEX_INITIALIZER;
++static IAudioClient *client = NULL;
++static IAudioRenderClient *render = NULL;
++static UINT32 buffer_frames = 0;
++static UINT32 latency_frames = 0; // stream latency reported by the engine
++static int running = 0;
++static int32_t current_encoded_output_format = 0;
++static unsigned int frame_bytes = 0;
++
++static void com_init_thread(void) {
++  // COINIT_MULTITHREADED: the objects are shared by the player and the RTSP threads.
++  // Returns S_FALSE if already initialised on this thread, which is fine.
++  CoInitializeEx(NULL, COINIT_MULTITHREADED);
++}
++
++static void release_device(void) {
++  if (render) {
++    IAudioRenderClient_Release(render);
++    render = NULL;
++  }
++  if (client) {
++    IAudioClient_Stop(client);
++    IAudioClient_Release(client);
++    client = NULL;
++  }
++  running = 0;
++}
++
++// Open the default render device for the current output format. Caller holds wasapi_mutex.
++static int open_device(void) {
++  com_init_thread();
++  release_device();
++  if (current_encoded_output_format == 0)
++    return -1;
++
++  unsigned int rate = RATE_FROM_ENCODED_FORMAT(current_encoded_output_format);
++  unsigned int channels = CHANNELS_FROM_ENCODED_FORMAT(current_encoded_output_format);
++  sps_format_t format = FORMAT_FROM_ENCODED_FORMAT(current_encoded_output_format);
++  unsigned int bits = format == SPS_FORMAT_S32_LE ? 32 : 16;
++  frame_bytes = channels * bits / 8;
++
++  IMMDeviceEnumerator *enumerator = NULL;
++  IMMDevice *device = NULL;
++  HRESULT hr = CoCreateInstance(&sps_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
++                                &sps_IID_IMMDeviceEnumerator, (void **)&enumerator);
++  if (SUCCEEDED(hr))
++    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device);
++  if (SUCCEEDED(hr))
++    hr = IMMDevice_Activate(device, &sps_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&client);
++  if (device)
++    IMMDevice_Release(device);
++  if (enumerator)
++    IMMDeviceEnumerator_Release(enumerator);
++  if (FAILED(hr)) {
++    warn("wasapi: no default audio output device (hr=0x%08lx).", (unsigned long)hr);
++    client = NULL;
++    return -1;
++  }
++
++  WAVEFORMATEX fmt;
++  memset(&fmt, 0, sizeof(fmt));
++  fmt.wFormatTag = WAVE_FORMAT_PCM;
++  fmt.nChannels = (WORD)channels;
++  fmt.nSamplesPerSec = rate;
++  fmt.wBitsPerSample = (WORD)bits;
++  fmt.nBlockAlign = (WORD)frame_bytes;
++  fmt.nAvgBytesPerSec = rate * frame_bytes;
++
++  hr = IAudioClient_Initialize(
++      client, AUDCLNT_SHAREMODE_SHARED,
++      AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY,
++      (REFERENCE_TIME)(DEVICE_BUFFER_SECONDS * 10000000), 0, &fmt, NULL);
++  if (SUCCEEDED(hr))
++    hr = IAudioClient_GetBufferSize(client, &buffer_frames);
++  if (SUCCEEDED(hr))
++    hr = IAudioClient_GetService(client, &sps_IID_IAudioRenderClient, (void **)&render);
++  if (FAILED(hr)) {
++    warn("wasapi: could not open the output stream (hr=0x%08lx).", (unsigned long)hr);
++    release_device();
++    return -1;
++  }
++  REFERENCE_TIME latency = 0;
++  IAudioClient_GetStreamLatency(client, &latency);
++  latency_frames = (UINT32)((uint64_t)latency * rate / 10000000);
++  debug(1, "wasapi: opened default device, %s, buffer %u frames, stream latency %u frames.",
++        short_format_description(current_encoded_output_format), buffer_frames, latency_frames);
++  return 0;
++}
++
++static int check_configuration(unsigned int channels, unsigned int rate, unsigned int format) {
++  if (channels != 2)
++    return EINVAL;
++  if (rate != 44100 && rate != 48000)
++    return EINVAL;
++  if (format != SPS_FORMAT_S16_LE && format != SPS_FORMAT_S32_LE)
++    return EINVAL;
++  return 0;
++}
++
++static int32_t get_configuration(unsigned int channels, unsigned int rate, unsigned int format) {
++  return search_for_suitable_configuration(channels, rate, format, &check_configuration);
++}
++
++static int configure(int32_t requested_encoded_format, char **channel_map) {
++  pthread_mutex_lock(&wasapi_mutex);
++  int response = 0;
++  if (requested_encoded_format != current_encoded_output_format) {
++    current_encoded_output_format = requested_encoded_format;
++    response = open_device();
++  }
++  pthread_mutex_unlock(&wasapi_mutex);
++  if (channel_map != NULL)
++    *channel_map = NULL;
++  return response;
++}
++
++static int init(__attribute__((unused)) int argc, __attribute__((unused)) char **argv) {
++  config.audio_backend_buffer_desired_length = 0.2;
++  config.audio_backend_buffer_interpolation_threshold_in_seconds = 0.12;
++  config.audio_backend_latency_offset = 0;
++  parse_audio_options("wasapi", (1 << SPS_FORMAT_S16_LE) | (1 << SPS_FORMAT_S32_LE),
++                      (1 << SPS_RATE_44100) | (1 << SPS_RATE_48000), (1 << 2));
++  com_init_thread();
++  return 0;
++}
++
++static void deinit(void) {
++  pthread_mutex_lock(&wasapi_mutex);
++  release_device();
++  pthread_mutex_unlock(&wasapi_mutex);
++}
++
++static int play(void *buf, int frames, __attribute__((unused)) int sample_type,
++                __attribute__((unused)) uint32_t timestamp,
++                __attribute__((unused)) uint64_t playtime) {
++  pthread_mutex_lock(&wasapi_mutex);
++  com_init_thread();
++  if (client == NULL && open_device() != 0) {
++    pthread_mutex_unlock(&wasapi_mutex);
++    return 0; // drop the audio; the next block retries the device
++  }
++  int written = 0;
++  while (written < frames) {
++    UINT32 padding = 0;
++    HRESULT hr = IAudioClient_GetCurrentPadding(client, &padding);
++    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
++      warn("wasapi: the output device went away; reopening the default device.");
++      if (open_device() != 0)
++        break;
++      continue;
++    }
++    UINT32 room = buffer_frames - padding;
++    if (room == 0) {
++      // the buffer is full: let it drain a little without holding the lock
++      pthread_mutex_unlock(&wasapi_mutex);
++      usleep(2000);
++      pthread_mutex_lock(&wasapi_mutex);
++      if (client == NULL)
++        break;
++      continue;
++    }
++    UINT32 n = (UINT32)(frames - written) < room ? (UINT32)(frames - written) : room;
++    BYTE *dst = NULL;
++    hr = IAudioRenderClient_GetBuffer(render, n, &dst);
++    if (FAILED(hr)) {
++      debug(1, "wasapi: GetBuffer failed (hr=0x%08lx).", (unsigned long)hr);
++      break;
++    }
++    memcpy(dst, (char *)buf + (size_t)written * frame_bytes, (size_t)n * frame_bytes);
++    IAudioRenderClient_ReleaseBuffer(render, n, 0);
++    written += n;
++    if (!running) {
++      IAudioClient_Start(client);
++      running = 1;
++    }
++  }
++  pthread_mutex_unlock(&wasapi_mutex);
++  return 0;
++}
++
++static int delay(long *the_delay) {
++  pthread_mutex_lock(&wasapi_mutex);
++  com_init_thread();
++  int response = 0;
++  UINT32 padding = 0;
++  if (client == NULL || !running) {
++    *the_delay = 0;
++  } else if (FAILED(IAudioClient_GetCurrentPadding(client, &padding))) {
++    *the_delay = 0;
++    response = -EIO;
++  } else {
++    *the_delay = (long)padding + (long)latency_frames;
++  }
++  pthread_mutex_unlock(&wasapi_mutex);
++  return response;
++}
++
++static void flush(void) {
++  pthread_mutex_lock(&wasapi_mutex);
++  com_init_thread();
++  if (client) {
++    IAudioClient_Stop(client);
++    IAudioClient_Reset(client);
++  }
++  running = 0;
++  pthread_mutex_unlock(&wasapi_mutex);
++}
++
++static void stop(void) { flush(); }
++
++static void help(void) {
++  printf("    The wasapi backend plays to the default Windows audio device and has no options.\n");
++}
++
++// Remember the AirPlay volume across restarts in the file named by SPS_VOLUME_FILE.
++// Mute (-144) is not saved, so a restart never comes back muted.
++void wasapi_save_volume(double airplay_volume) {
++  const char *path = getenv("SPS_VOLUME_FILE");
++  if (path == NULL || airplay_volume < -30.0 || airplay_volume > 0.0)
++    return;
++  FILE *f = fopen(path, "w");
++  if (f) {
++    fprintf(f, "%.3f\n", airplay_volume);
++    fclose(f);
++  }
++}
++
++void wasapi_load_volume(double *airplay_volume) {
++  const char *path = getenv("SPS_VOLUME_FILE");
++  double v;
++  FILE *f = path ? fopen(path, "r") : NULL;
++  if (f == NULL)
++    return;
++  if (fscanf(f, "%lf", &v) == 1 && v >= -30.0 && v <= 0.0) {
++    *airplay_volume = v;
++    debug(1, "wasapi: restored the last AirPlay volume, %.3f.", v);
++  }
++  fclose(f);
++}
++
++audio_output audio_wasapi = {.name = "wasapi",
++                             .help = &help,
++                             .init = &init,
++                             .deinit = &deinit,
++                             .prepare = NULL,
++                             .get_configuration = &get_configuration,
++                             .configure = &configure,
++                             .play = &play,
++                             .stop = &stop,
++                             .is_running = NULL,
++                             .flush = &flush,
++                             .delay = &delay,
++                             .stats = NULL,
++                             .volume = NULL,
++                             .parameters = NULL,
++                             .mute = NULL};
+diff --git a/configure.ac b/configure.ac
+index 7eaf83d..4326046 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -19,7 +19,7 @@ if test "z$with_os" = "z"; then
+ fi
+ with_os=`echo ${with_os} | tr '[[:upper:]]' '[[:lower:]]' `
+ case "x${with_os}" in
+-xlinux|xfreebsd|xopenbsd|xdarwin)
++xlinux|xfreebsd|xopenbsd|xdarwin|xcygwin)
+   ;;
+ *)
+   AC_MSG_ERROR([--with-os=<arg> argument must be one of linux, freebsd, openbsd or darwin])
+@@ -121,6 +121,21 @@ if  test "x$with_external_mdns" = xyes ; then
+ fi
+ AM_CONDITIONAL([USE_EXTERNAL_MDNS], [test "x$with_external_mdns" = "xyes" ])
+ 
++# local patch: Windows (Cygwin/MSYS2) -- in-process mDNS using UxPlay's minimal responder
++AC_ARG_WITH([uxmdnsd],[AS_HELP_STRING([--with-uxmdnsd],[advertise with the built-in UxPlay mdnsd responder (Windows)])])
++if  test "x$with_uxmdnsd" = xyes ; then
++	AC_DEFINE([CONFIG_UXMDNSD], 1, [Advertise with the built-in UxPlay mdnsd responder])
++fi
++AM_CONDITIONAL([USE_UXMDNSD], [test "x$with_uxmdnsd" = "xyes" ])
++
++# local patch: Windows (Cygwin/MSYS2) -- WASAPI audio output
++AC_ARG_WITH([wasapi],[AS_HELP_STRING([--with-wasapi],[include the Windows WASAPI audio back end])])
++if test "x$with_wasapi" = "xyes" ; then
++  AC_DEFINE([CONFIG_WASAPI], 1, [Include the Windows WASAPI audio back end.])
++  LIBS="-lole32 ${LIBS}"
++fi
++AM_CONDITIONAL([USE_WASAPI], [test "x$with_wasapi" = "xyes"])
++
+ # Check if we want to create user/group (default to yes):
+ 
+ AC_ARG_WITH([create-user-group],[AS_HELP_STRING([--with-create-user-group],[create user/group during a make install])], ,[with_with_create_user_group=yes])
+diff --git a/mdns.c b/mdns.c
+index 92df9fa..bf0798f 100644
+--- a/mdns.c
++++ b/mdns.c
+@@ -42,12 +42,18 @@ extern mdns_backend mdns_dns_sd;
+ extern mdns_backend mdns_tinysvcmdns;
+ #endif
+ 
++#ifdef CONFIG_UXMDNSD
++extern mdns_backend mdns_uxmdnsd;
++#endif
+ #ifdef CONFIG_EXTERNAL_MDNS
+ extern mdns_backend mdns_external_avahi;
+ extern mdns_backend mdns_external_dns_sd;
+ #endif
+ 
+ static mdns_backend *mdns_backends[] = {
++#ifdef CONFIG_UXMDNSD
++    &mdns_uxmdnsd,
++#endif
+ #ifdef CONFIG_AVAHI
+     &mdns_avahi,
+ #endif
+diff --git a/mdns_uxmdnsd.c b/mdns_uxmdnsd.c
+new file mode 100644
+index 0000000..258bb8c
+--- /dev/null
++++ b/mdns_uxmdnsd.c
+@@ -0,0 +1,107 @@
++/*
++ * In-process mDNS backend for Windows (Cygwin/MSYS2) builds, using the minimal mDNS responder
++ * from UxPlay (lib/mdnsd, LGPL-2.1, copied into uxplay/ at build time).
++ * Local patch from airplay2-windows -- not part of upstream Shairport Sync.
++ *
++ * Windows has no Avahi, and tinysvcmdns cannot advertise the AirPlay 2 service; this backend
++ * publishes both _airplay._tcp (AirPlay 2) and _raop._tcp (AirPlay 1) records and answers queries
++ * from its own thread.
++ */
++
++#include "common.h"
++#include "mdns.h"
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <unistd.h>
++
++#include "uxplay/mdnsd/mdnsd.h"
++
++static mdnsd_t *responder = NULL;
++static mdnsd_service_t airplay_service, raop_service;
++static char saved_ap1name[MDNSD_MAX_NAME];
++static char saved_ap2name[MDNSD_MAX_NAME];
++static int saved_port = 0;
++
++static void fill_txt(mdnsd_txt_t *txt, char **records) {
++  memset(txt, 0, sizeof(*txt));
++  for (int i = 0; records && records[i]; i++) {
++    char *kv = strdup(records[i]);
++    char *eq = strchr(kv, '=');
++    if (eq)
++      *eq = '\0';
++    if (mdnsd_txt_add(txt, kv, eq ? eq + 1 : "") != 0)
++      warn("mdns_uxmdnsd: TXT record full, dropped \"%s\".", records[i]);
++    free(kv);
++  }
++}
++
++static int publish(char **txt_records, char **secondary_txt_records) {
++  // txt_records go with the AirPlay 1 (_raop) service, secondary_txt_records with AirPlay 2
++  memset(&airplay_service, 0, sizeof(airplay_service));
++  snprintf(airplay_service.type, sizeof(airplay_service.type), "_airplay._tcp.local");
++  snprintf(airplay_service.name, sizeof(airplay_service.name), "%s._airplay._tcp.local",
++           saved_ap2name);
++  airplay_service.port = (unsigned short)saved_port;
++  airplay_service.registered = secondary_txt_records != NULL;
++  fill_txt(&airplay_service.txt, secondary_txt_records);
++
++  memset(&raop_service, 0, sizeof(raop_service));
++  snprintf(raop_service.type, sizeof(raop_service.type), "_raop._tcp.local");
++  snprintf(raop_service.name, sizeof(raop_service.name), "%s._raop._tcp.local", saved_ap1name);
++  raop_service.port = (unsigned short)saved_port;
++  raop_service.registered = 1;
++  fill_txt(&raop_service.txt, txt_records);
++
++  mdnsd_set_services(responder, &airplay_service, &raop_service);
++  mdnsd_announce(responder, MDNSD_TTL_SERVICE);
++  debug(1, "mdns_uxmdnsd: announced \"%s\" and \"%s\" on port %d.", saved_ap2name, saved_ap1name,
++        saved_port);
++  return 0;
++}
++
++static int mdns_uxmdnsd_register(char *ap1name, char *ap2name, int port, char **txt_records,
++                                 char **secondary_txt_records) {
++  char host[MDNSD_MAX_NAME];
++  char name[MDNSD_MAX_NAME - 8] = "airplay2-windows";
++  gethostname(name, sizeof(name));
++  snprintf(host, sizeof(host), "%s.local", name);
++
++  responder = mdnsd_init(host);
++  if (responder == NULL || mdnsd_start(responder) != 0) {
++    warn("mdns_uxmdnsd: could not start the mDNS responder (is UDP port 5353 usable?).");
++    if (responder) {
++      mdnsd_destroy(responder);
++      responder = NULL;
++    }
++    return -1;
++  }
++  snprintf(saved_ap1name, sizeof(saved_ap1name), "%s", ap1name);
++  snprintf(saved_ap2name, sizeof(saved_ap2name), "%s", ap2name ? ap2name : ap1name);
++  saved_port = port;
++  return publish(txt_records, secondary_txt_records);
++}
++
++static int mdns_uxmdnsd_update(char **txt_records, char **secondary_txt_records) {
++  if (responder == NULL)
++    return -1;
++  return publish(txt_records, secondary_txt_records);
++}
++
++static void mdns_uxmdnsd_unregister(void) {
++  if (responder) {
++    mdnsd_goodbye(responder, &airplay_service);
++    mdnsd_goodbye(responder, &raop_service);
++    mdnsd_stop(responder);
++    mdnsd_destroy(responder);
++    responder = NULL;
++  }
++}
++
++mdns_backend mdns_uxmdnsd = {.name = "uxmdnsd",
++                             .mdns_register = mdns_uxmdnsd_register,
++                             .mdns_update = mdns_uxmdnsd_update,
++                             .mdns_unregister = mdns_uxmdnsd_unregister,
++                             .mdns_dacp_monitor_start = NULL,
++                             .mdns_dacp_monitor_set_id = NULL,
++                             .mdns_dacp_monitor_stop = NULL};
+diff --git a/player.c b/player.c
+index 1be6975..25d3a8e 100644
+--- a/player.c
++++ b/player.c
+@@ -5338,6 +5338,9 @@ void player_volume_without_notification(double airplay_volume, rtsp_conn_info *c
+   // here, store the volume for possible use in the future
+   config.airplay_volume = airplay_volume;
+   conn->own_airplay_volume = airplay_volume;
++#ifdef CONFIG_WASAPI
++  wasapi_save_volume(airplay_volume); // local patch: remember it across restarts
++#endif
+   pthread_mutex_unlock(&conn->volume_control_mutex);
+ }
+ 
+diff --git a/rtsp.c b/rtsp.c
+index 3e66903..a5dec3b 100644
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -3168,6 +3168,9 @@ void handle_set_parameter_parameter(rtsp_conn_info *conn, rtsp_message *req,
+         conn->own_airplay_volume = volume;
+         conn->own_airplay_volume_set = 1;
+       }
++#ifdef CONFIG_WASAPI
++      wasapi_save_volume(volume); // local patch: also when set while nothing is playing
++#endif
+       pthread_cleanup_pop(1); // release the principal_conn lock
+                               // #ifdef CONFIG_DBUS_INTERFACE
+                               //       }
+diff --git a/shairport.c b/shairport.c
+index eca9c3e..1a1ae7c 100644
+--- a/shairport.c
++++ b/shairport.c
+@@ -2053,6 +2053,9 @@ int parse_options(int argc, char **argv) {
+   if (tdebuglev != 0)
+     set_debug_level(tdebuglev);
+ 
++#ifdef CONFIG_WASAPI
++  wasapi_load_volume(&config.default_airplay_volume); // local patch: last volume used, if saved
++#endif
+   // now set the initial volume to the default volume
+   config.airplay_volume =
+       config.default_airplay_volume; // if no volume is ever set or requested, default to initial

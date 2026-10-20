@@ -16,28 +16,28 @@ iOS **video apps** only send sound to receivers that support AirPlay 2 *buffered
 
 - video apps (tested: Bilibili, YouTube) play sound, **in sync with the picture**
   on the phone (the video stays on the phone);
-- music apps (Apple Music) work as usual.
+- music apps (Apple Music) work as usual;
+- the last volume is remembered across restarts (`config\volume.txt`).
 
 It is audio only: no screen mirroring, no AirPlay video.
 
 ## How it works
 
-```
-iPhone ──AirPlay 2──▶ shairport-sync ──PCM (stdout)──▶ pcm-play.exe (WASAPI) ──▶ default audio device
-                         │  ▲
-       PTP (UDP 319/320) │  │ shared memory
-                         ▼  │
-                        nqptp
+Two programs run:
 
-shairport-sync ──TXT records (pipe)──▶ mdns-pub.exe ──mDNS (UDP 5353)──▶ LAN
+```
+                     ┌──────────── shairport-sync.exe ────────────┐
+iPhone ──AirPlay 2──▶│ AirPlay 2 service ──▶ wasapi audio backend  │──▶ default audio device
+                     │ uxmdnsd backend (mDNS, UDP 5353) ──▶ LAN    │
+                     └────────────────────▲───────────────────────┘
+                                          │ shared memory (clock)
+         PTP (UDP 319/320) ◀──▶ nqptp.exe ┘
 ```
 
 | Part | What was needed on Windows |
 | --- | --- |
 | `nqptp` | Builds as-is once `configure` accepts Cygwin, plus two fixes ([patch](patches/nqptp-cygwin.patch)): the shared-memory block was only `mmap`ed for Linux/FreeBSD/macOS (on any other OS Shairport Sync reports *"The NQPTP service … does not seem to be initialised"*), and the clock identity MAC comes from `NQPTP_MAC` because Cygwin's `getifaddrs()` has no link-layer entries. |
-| `shairport-sync` | `--with-os=cygwin`, and a new mDNS backend `winpipe` ([patch](patches/shairport-sync-cygwin.patch)): there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise the AirPlay 2 service. |
-| `mdns-pub.exe` | Small native publisher built on UxPlay's minimal mDNS responder (`lib/mdnsd`). Reads the records from Shairport Sync over a pipe and answers mDNS queries; sends goodbye packets when the pipe closes. |
-| `pcm-play.exe` | Tiny native WASAPI player: Shairport Sync's `stdout` backend is piped into it. Shairport Sync already paces the output against the AirPlay clock, so it just plays what arrives. |
+| `shairport-sync` | `--with-os=cygwin` plus two new backends ([patch](patches/shairport-sync-windows.patch)). **`wasapi`** plays to the default Windows audio device in shared mode and reports the real output delay (queued frames + stream latency), which Shairport Sync uses to stay in sync with the AirPlay clock; it reopens the default device if the current one goes away. **`uxmdnsd`** advertises the AirPlay 2 and AirPlay 1 services with UxPlay's minimal mDNS responder (`lib/mdnsd`) running in-process — there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise AirPlay 2. |
 
 The release zip is self-contained: the Cygwin/MSYS runtime DLLs ship in `usr\bin`, so the folder
 is its own little MSYS root and nothing else needs to be installed.
@@ -72,7 +72,7 @@ bash scripts/build.sh     # installs pacman packages, builds everything, stages 
 ```
 
 `build.sh` builds libsodium, libconfig, libplist, a minimal FFmpeg (AAC/ALAC decoders only), nqptp,
-shairport-sync, mdns-pub and pcm-play, then `scripts/bundle.sh` collects them with the DLLs they
+and shairport-sync (with the WASAPI and built-in mDNS backends), then `scripts/bundle.sh` collects them with the DLLs they
 need, license texts and a third-party notice into `dist/airplay2-windows/` and a zip. FFmpeg is the
 slow part and needs a few GB of RAM with many parallel jobs; use `JOBS=2 bash scripts/build.sh` on
 small machines. Releases are built the same way by GitHub Actions (`.github/workflows/release.yml`).
@@ -81,9 +81,9 @@ small machines. Releases are built the same way by GitHub Actions (`.github/work
 
 | Symptom | Check |
 | --- | --- |
-| Not listed on the phone | Network profile must be Private. Toggle Wi-Fi on the phone (iOS caches entries). `mdns-pub` must be running. |
+| Not listed on the phone | Network profile must be Private. Toggle Wi-Fi on the phone (iOS caches entries). Another program holding UDP 5353 exclusively can stop the announcement; see `logs\shairport-sync.log`. |
 | Listed, connects, no sound | `logs/shairport-sync.log`. If NQPTP is "not initialised", the nqptp patch is missing. |
-| No sound after changing the default audio device | `pcm-play` exits when its device goes away and the service restarts it on the new default within a few seconds; see `logs\restarts.log`. |
+| Plays on the wrong device | It always plays to the Windows default output device. If that device goes away, the next audio reopens the new default. |
 | Port 7000 already in use (e.g. UxPlay) | Re-run `install.ps1 -Port 7010`. Both can run side by side. |
 
 `Can't create a device ID -- no valid MAC address can be found` in the log is harmless:
@@ -103,9 +103,9 @@ Shairport Sync then derives the device ID from the service name.
 
 ## License
 
-The scripts and `mdns-pub/mdns-pub.c` in this repository are under the [MIT License](LICENSE).
+The scripts in this repository are under the [MIT License](LICENSE).
 The patches modify, and are distributed under the licenses of, the projects they apply to:
-nqptp (GPL-2.0) and shairport-sync (see its `LICENSES`). `mdns-pub` is linked with UxPlay's
+nqptp (GPL-2.0) and shairport-sync (see its `LICENSES`). The `uxmdnsd` backend compiles in UxPlay's
 `lib/mdnsd` (LGPL-2.1). Release zips contain third-party binaries; `THIRD_PARTY.txt` and
 `licenses\` in the zip list them with their licenses, and each release has a matching
 `-sources.zip` with the corresponding source code.

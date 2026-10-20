@@ -14,7 +14,7 @@ $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
     throw 'Run this script from an elevated (Administrator) PowerShell.'
 }
-foreach ($exe in 'nqptp.exe', 'shairport-sync.exe', 'mdns-pub.exe', 'pcm-play.exe') {
+foreach ($exe in 'nqptp.exe', 'shairport-sync.exe') {
     if (-not (Test-Path (Join-Path $bin $exe))) {
         throw "$exe not found in $bin -- run this from an unpacked release (or a bundle made by scripts/bundle.sh)."
     }
@@ -29,7 +29,7 @@ Write-Host "Config: name '$Name', port $Port"
 
 # Firewall: inbound for the programs that listen, Private networks only
 Get-NetFirewallRule -DisplayName 'airplay2-windows *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule
-foreach ($exe in 'nqptp', 'shairport-sync', 'mdns-pub') {
+foreach ($exe in 'nqptp', 'shairport-sync') {
     foreach ($proto in 'TCP', 'UDP') {
         New-NetFirewallRule -DisplayName "airplay2-windows $exe $proto" -Direction Inbound -Action Allow `
             -Profile Private -Program (Join-Path $bin "$exe.exe") -Protocol $proto | Out-Null
@@ -60,7 +60,7 @@ if (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue) {
 Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings `
     -Principal $taskPrincipal -Description "AirPlay 2 receiver '$Name' (airplay2-windows)" -Force | Out-Null
 
-Get-Process nqptp, shairport-sync, mdns-pub, pcm-play -ErrorAction SilentlyContinue |
+Get-Process nqptp, shairport-sync -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($bin, [StringComparison]::OrdinalIgnoreCase) } |
     Stop-Process -Force -ErrorAction SilentlyContinue
 Start-ScheduledTask -TaskName $TaskName

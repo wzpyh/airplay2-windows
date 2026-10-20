@@ -1,0 +1,19 @@
+--- a/lib/mdnsd/mdnsd.c
++++ b/lib/mdnsd/mdnsd.c
+@@ -348,6 +348,16 @@
+ static uint32_t mdns_get_default_ipv4(void)
+ {
+     uint32_t addr = 0;
++    /* airplay2-windows: the caller can pin the interface address. Guessing it from the
++     * multicast route is unreliable on hosts with several (virtual) adapters, and joining the
++     * group on the wrong one means queries are never seen. */
++    const char *pinned = getenv("MDNSD_IPV4");
++    if (pinned && *pinned) {
++        struct in_addr in;
++        if (inet_pton(AF_INET, pinned, &in) == 1) {
++            return in.s_addr;
++        }
++    }
+ #ifdef _WIN32
+     ULONG buflen = 15000;
+     PIP_ADAPTER_ADDRESSES pAddresses = NULL;

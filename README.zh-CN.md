@@ -12,28 +12,28 @@ UxPlay 等免费的 Windows 接收端只支持老式的实时 AirPlay 音频。�
 AirPlay 2 **缓冲音频 + PTP 时钟**的接收端发声音，碰到老式接收端就只发静音。用这个接收端：
 
 - 视频 App（实测 B 站、YouTube）有声音，而且**和手机上的画面同步**（视频留在手机上播）；
-- 音乐 App（Apple Music）照常可用。
+- 音乐 App（Apple Music）照常可用；
+- 重启后会记住上次的音量（保存在 `config\volume.txt`）。
 
 只有音频，不支持屏幕镜像和 AirPlay 视频。
 
 ## 原理
 
-```
-iPhone ──AirPlay 2──▶ shairport-sync ──PCM(stdout)──▶ pcm-play.exe(WASAPI) ──▶ 默认音频设备
-                         │  ▲
-         PTP(UDP 319/320)│  │ 共享内存
-                         ▼  │
-                        nqptp
+只跑两个程序：
 
-shairport-sync ──TXT 记录(管道)──▶ mdns-pub.exe ──mDNS(UDP 5353)──▶ 局域网
+```
+                     ┌──────────── shairport-sync.exe ────────────┐
+iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后端           │──▶ 默认音频设备
+                     │ uxmdnsd 后端（mDNS，UDP 5353）──▶ 局域网     │
+                     └────────────────────▲───────────────────────┘
+                                          │ 共享内存（时钟）
+          PTP（UDP 319/320）◀──▶ nqptp.exe ┘
 ```
 
 | 组件 | 在 Windows 上需要的改动 |
 | --- | --- |
 | `nqptp` | 让 `configure` 接受 Cygwin，另修两处（[补丁](patches/nqptp-cygwin.patch)）：共享内存只在 Linux/FreeBSD/macOS 分支里 `mmap`，其他系统上 Shairport Sync 会报 *"The NQPTP service … does not seem to be initialised"*；Cygwin 的 `getifaddrs()` 拿不到网卡 MAC，时钟 ID 改从环境变量 `NQPTP_MAC` 读。 |
-| `shairport-sync` | `--with-os=cygwin`，新增 mDNS 后端 `winpipe`（[补丁](patches/shairport-sync-cygwin.patch)）：Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2 服务。 |
-| `mdns-pub.exe` | 基于 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`）写的原生小程序。通过管道接收 Shairport Sync 的服务记录并应答 mDNS 查询；管道关闭时发送下线包。 |
-| `pcm-play.exe` | 很小的原生 WASAPI 播放器，Shairport Sync 的 `stdout` 输出通过管道送给它。Shairport Sync 已经按 AirPlay 时钟控制了输出节奏，它只管收到就播。 |
+| `shairport-sync` | `--with-os=cygwin`，另加两个后端（[补丁](patches/shairport-sync-windows.patch)）。**`wasapi`**：以共享模式播放到 Windows 默认音频设备，并上报真实的输出延迟（缓冲中的帧数 + 流延迟），Shairport Sync 靠它和 AirPlay 时钟保持同步；当前设备消失时会自动重新打开默认设备。**`uxmdnsd`**：在进程内运行 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`），发布 AirPlay 2 和 AirPlay 1 服务——Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2。 |
 
 发布的 zip 是自包含的：Cygwin/MSYS 运行库 DLL 放在 `usr\bin` 里，整个文件夹就是一个小型 MSYS 根目录，
 不需要再装任何东西。
@@ -66,7 +66,7 @@ bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/ai
 ```
 
 `build.sh` 依次编译 libsodium、libconfig、libplist、精简版 FFmpeg（只有 AAC/ALAC 解码器）、nqptp、
-shairport-sync、mdns-pub 和 pcm-play，然后由 `scripts/bundle.sh` 把它们连同所需的 DLL、许可证文本和
+以及带 WASAPI 和内置 mDNS 后端的 shairport-sync，然后由 `scripts/bundle.sh` 把它们连同所需的 DLL、许可证文本和
 第三方声明一起放进 `dist/airplay2-windows/` 并打成 zip。FFmpeg 最慢，并行任务多时要吃几 GB 内存，
 小内存机器用 `JOBS=2 bash scripts/build.sh`。Release 由 GitHub Actions 按同样的流程编译
 （`.github/workflows/release.yml`）。
@@ -75,9 +75,9 @@ shairport-sync、mdns-pub 和 pcm-play，然后由 `scripts/bundle.sh` 把它们
 
 | 现象 | 检查 |
 | --- | --- |
-| 手机上看不到 | 网络必须是 Private；iPhone 会缓存列表，关开一次 Wi-Fi；`mdns-pub` 进程要在。 |
+| 手机上看不到 | 网络必须是 Private；iPhone 会缓存列表，关开一次 Wi-Fi；如果有别的程序独占了 UDP 5353，广播会发不出去，看 `logs\shairport-sync.log`。 |
 | 能看到、能连上，但没声音 | 看 `logs\shairport-sync.log`。如果报 NQPTP "not initialised"，说明 nqptp 补丁没打上。 |
-| 换了默认音频设备后没声音 | 设备消失时 `pcm-play` 会退出，服务几秒内会在新的默认设备上重启它；看 `logs\restarts.log`。 |
+| 声音从别的设备出来 | 它总是播放到 Windows 的默认输出设备。当前设备消失时，下一段音频会自动改用新的默认设备。 |
 | 7000 端口被占用（比如装了 UxPlay） | 重新运行 `install.ps1 -Port 7010`，两个可以并存。 |
 
 日志里的 `Can't create a device ID -- no valid MAC address can be found` 不影响使用：
@@ -97,7 +97,7 @@ Shairport Sync 会改用服务名生成设备 ID。
 
 ## 许可证
 
-本仓库的脚本和 `mdns-pub/mdns-pub.c` 采用 [MIT 许可证](LICENSE)。补丁修改的是对应的上游项目，
-按上游的许可证发布：nqptp（GPL-2.0）、shairport-sync（见其 `LICENSES`）。`mdns-pub` 链接 UxPlay 的
+本仓库的脚本采用 [MIT 许可证](LICENSE)。补丁修改的是对应的上游项目，
+按上游的许可证发布：nqptp（GPL-2.0）、shairport-sync（见其 `LICENSES`）。`uxmdnsd` 后端编译进了 UxPlay 的
 `lib/mdnsd`（LGPL-2.1）。Release 的 zip 里包含第三方二进制文件，zip 内的 `THIRD_PARTY.txt` 和
 `licenses\` 列出了它们及各自的许可证；每个 Release 都附有对应的 `-sources.zip`，内含相应源码。

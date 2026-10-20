@@ -2,7 +2,7 @@
 # Build the AirPlay 2 receiver stack for Windows inside MSYS2.
 #
 #   Run from an "MSYS2 MSYS" shell (not UCRT64/MINGW64): nqptp and shairport-sync need the
-#   POSIX layer (fork, shm_open, mmap). mdns-pub is built natively with the UCRT64 compiler.
+#   POSIX layer (fork, shm_open, mmap).
 #
 #   scripts/build.sh    install packages, build everything into /usr/local, then stage a
 #                       standalone bundle in dist/ (scripts/bundle.sh) that runs without MSYS2
@@ -32,9 +32,7 @@ step "checking sources"
 step "installing MSYS2 packages"
 pacman -S --needed --noconfirm \
   autotools gcc make pkgconf diffutils tar xz flex bison texinfo vim patch libarchive git \
-  libutil-linux-devel libgcrypt-devel openssl-devel popt-devel \
-  mingw-w64-ucrt-x86_64-gcc \
-  mingw-w64-ucrt-x86_64-gstreamer mingw-w64-ucrt-x86_64-gst-plugins-base >/dev/null
+  libutil-linux-devel libgcrypt-devel openssl-devel popt-devel >/dev/null
 
 mkdir -p "$work"
 cd "$work"
@@ -69,21 +67,18 @@ unpack nqptp.tar.gz nqptp
 (cd nqptp && patch -p1 < "$root/patches/nqptp-cygwin.patch" && autoreconf -fi && ./configure --prefix=$prefix \
   && make -j"$jobs" && cp nqptp.exe $prefix/bin/) > nqptp.log 2>&1 || { log nqptp.log; exit 1; }
 
-step "shairport-sync (AirPlay 2)"
-unpack shairport-sync.tar.gz shairport-sync
-(cd shairport-sync && patch -p1 < "$root/patches/shairport-sync-cygwin.patch" && autoreconf -fi \
-  && ./configure --prefix=$prefix --sysconfdir=$prefix/etc --with-os=cygwin --with-airplay-2 --with-ssl=openssl \
-       --with-stdout --with-winpipe-mdns \
-  && make -j"$jobs" && cp shairport-sync.exe $prefix/bin/) > shairport-sync.log 2>&1 || { log shairport-sync.log; exit 1; }
-
-step "mdns-pub (native, UCRT64)"
+step "shairport-sync (AirPlay 2, WASAPI output, built-in mDNS)"
 unpack uxplay.tar.gz uxplay
-PATH="/ucrt64/bin:$PATH" /ucrt64/bin/gcc -O2 -Wall -static -o $prefix/bin/mdns-pub.exe \
-  "$root/mdns-pub/mdns-pub.c" uxplay/lib/mdnsd/mdnsd.c -Iuxplay/lib -Iuxplay/lib/mdnsd -lws2_32 -liphlpapi \
-  > mdns-pub.log 2>&1 || { log mdns-pub.log; exit 1; }
-
-step "pcm-play (native, UCRT64)"
-PATH="/ucrt64/bin:$PATH" /ucrt64/bin/gcc -O2 -Wall -static -o $prefix/bin/pcm-play.exe   "$root/pcm-play/pcm-play.c" -lole32 > pcm-play.log 2>&1 || { log pcm-play.log; exit 1; }
+unpack shairport-sync.tar.gz shairport-sync
+# UxPlay's minimal mDNS responder for the uxmdnsd backend (mdnsd.c includes "../compat.h")
+mkdir -p shairport-sync/uxplay/mdnsd
+cp uxplay/lib/mdnsd/mdnsd.c uxplay/lib/mdnsd/mdnsd.h shairport-sync/uxplay/mdnsd/
+cp uxplay/lib/compat.h uxplay/lib/threads.h uxplay/lib/sockets.h shairport-sync/uxplay/
+(cd shairport-sync/uxplay && patch -p2 < "$root/patches/uxplay-mdnsd.patch") > uxplay-mdnsd.log 2>&1 || { log uxplay-mdnsd.log; exit 1; }
+(cd shairport-sync && patch -p1 < "$root/patches/shairport-sync-windows.patch" && autoreconf -fi \
+  && ./configure --prefix=$prefix --sysconfdir=$prefix/etc --with-os=cygwin --with-airplay-2 --with-ssl=openssl \
+       --with-wasapi --with-uxmdnsd \
+  && make -j"$jobs" && cp shairport-sync.exe $prefix/bin/) > shairport-sync.log 2>&1 || { log shairport-sync.log; exit 1; }
 
 step "bundle"
 shairport-sync -V
