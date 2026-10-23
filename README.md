@@ -4,7 +4,7 @@ A free **AirPlay 2 audio receiver for Windows**, built from
 [Shairport Sync](https://github.com/mikebrady/shairport-sync) and
 [NQPTP](https://github.com/mikebrady/nqptp) running on the MSYS2/Cygwin POSIX layer.
 Your PC shows up as a speaker in the iPhone/iPad/Mac AirPlay menu and plays through
-whatever Windows audio device is the default.
+the Windows default audio device, or a device you pick.
 
 [中文说明](README.zh-CN.md)
 
@@ -51,7 +51,7 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 service ──▶ wasapi audio back
 | Part | What was needed on Windows |
 | --- | --- |
 | `nqptp` | Builds as-is once `configure` accepts Cygwin, plus two fixes ([patch](patches/nqptp-cygwin.patch)): the shared-memory block was only `mmap`ed for Linux/FreeBSD/macOS (on any other OS Shairport Sync reports *"The NQPTP service … does not seem to be initialised"*), and the clock identity MAC comes from `NQPTP_MAC` because Cygwin's `getifaddrs()` has no link-layer entries. |
-| `shairport-sync` | `--with-os=cygwin` plus two new backends ([patch](patches/shairport-sync-windows.patch)). **`wasapi`** plays to the default Windows audio device in shared mode and reports the real output delay (queued frames + stream latency), which Shairport Sync uses to stay in sync with the AirPlay clock; it reopens the default device if the current one goes away. **`uxmdnsd`** advertises the AirPlay 2 and AirPlay 1 services with UxPlay's minimal mDNS responder (`lib/mdnsd`) running in-process — there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise AirPlay 2. |
+| `shairport-sync` | `--with-os=cygwin` plus two new backends ([patch](patches/shairport-sync-windows.patch)). **`wasapi`** plays in shared mode and reports the real output delay (queued frames + stream latency), which Shairport Sync uses to stay in sync with the AirPlay clock. It plays to the default Windows audio device and follows it when you switch the output in Windows (an `IMMNotificationClient` watches for changes), or always to the device set in `output_device`, falling back to the default while that one is unplugged. **`uxmdnsd`** advertises the AirPlay 2 and AirPlay 1 services with UxPlay's minimal mDNS responder (`lib/mdnsd`) running in-process — there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise AirPlay 2. |
 
 The release zip is self-contained: the Cygwin/MSYS runtime DLLs ship in `usr\bin`, so the folder
 is its own little MSYS root and nothing else needs to be installed.
@@ -68,17 +68,26 @@ e.g. UxPlay, already uses it), installs to `C:\Program Files\airplay2-windows` a
 receiver. Then pick the name in the AirPlay menu on your phone.
 
 Windows SmartScreen may warn about an unknown publisher (the installer is not code-signed):
-*More info → Run anyway*. Upgrades keep the name, port and volume; uninstall it from
-*Settings → Apps*. Unattended install:
-`msiexec /i airplay2-windows-<version>-x64.msi /qn NAME="Living Room PC" PORT=7000`.
+*More info → Run anyway*. Upgrades keep the name, port, output device and volume; uninstall
+it from *Settings → Apps*. Unattended install:
+`msiexec /i airplay2-windows-<version>-x64.msi /qn NAME="Living Room PC" PORT=7000`
+(optional `OUTPUTDEVICE="..."`, see below).
 
 **Portable zip** (no installer): unzip `airplay2-windows-<version>-x64.zip` somewhere permanent,
 open PowerShell **as Administrator** in that folder and run
-`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"` (option `-Port`).
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"` (options `-Port`,
+`-OutputDevice`).
 `install.ps1` writes `config\shairport-sync.conf`, adds firewall rules, and registers a scheduled
 task `airplay2-windows` that starts at boot as SYSTEM (no logon needed) and restarts the receiver
-if it ever exits. Logs are in `logs\`. Re-run it to change the name or port; run `uninstall.ps1`
+if it ever exits. Logs are in `logs\`. Re-run it to change the name, port or output device; run `uninstall.ps1`
 (as Administrator) to remove it. The MSI runs these same two scripts.
+
+**Output device.** By default the receiver plays to the Windows default output device and moves
+to the new one when you switch it (in the taskbar sound menu, say), even mid-song. To always use
+one device whatever the default is, give its name in the installer, or `-OutputDevice` to
+`install.ps1`. Use the name Windows shows, e.g. `Headphones (AMD Audio Device)`, or any part of it
+that is unique; `.\install.ps1 -ListOutputDevices` lists them. While that device is unplugged or
+disabled, the default device is used, and the receiver switches back when it returns.
 
 ## Building from source
 
@@ -103,7 +112,7 @@ same way by GitHub Actions (`.github/workflows/release.yml`).
 | --- | --- |
 | Not listed on the phone | Network profile must be Private. Toggle Wi-Fi on the phone (iOS caches entries). Another program holding UDP 5353 exclusively can stop the announcement; see `logs\shairport-sync.log`. |
 | Listed, connects, no sound | `logs/shairport-sync.log`. If NQPTP is "not initialised", the nqptp patch is missing. |
-| Plays on the wrong device | It always plays to the Windows default output device. If that device goes away, the next audio reopens the new default. |
+| Plays on the wrong device | It follows the Windows default output device, or the `output_device` you set. `logs\shairport-sync.log` names the device it plays to (`wasapi: playing to "..."`) and, if your `output_device` matches nothing, lists the active devices. |
 | Port 7000 already in use (e.g. UxPlay) | Re-run `install.ps1 -Port 7010`. Both can run side by side. |
 
 `Can't create a device ID -- no valid MAC address can be found` in the log is harmless:

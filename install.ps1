@@ -1,14 +1,28 @@
 # Installs the AirPlay 2 receiver as a boot-time service (scheduled task running as SYSTEM).
 # Run from an elevated PowerShell inside the unpacked release folder. Safe to re-run, e.g. to
-# change the name or port.
+# change the name, port or output device.
+#   -OutputDevice   always play to this device (its name, or a part of it, as -ListOutputDevices
+#                   shows it); empty = the Windows default device, followed when it changes
 param(
     [string]$Name = "$env:COMPUTERNAME AirPlay",
-    [int]$Port = 7000
+    [int]$Port = 7000,
+    [string]$OutputDevice = '',
+    [switch]$ListOutputDevices
 )
 $ErrorActionPreference = 'Stop'
 $TaskName = 'airplay2-windows'
 $root = $PSScriptRoot
 $bin = Join-Path $root 'usr\bin'
+
+if ($ListOutputDevices) {
+    # render endpoints are SWD\MMDEVAPI\{0.0.0.00000000}.{guid}; capture ones are {0.0.1...}
+    Get-PnpDevice -Class AudioEndpoint |
+        Where-Object InstanceId -like 'SWD\MMDEVAPI\{0.0.0.*' |
+        Sort-Object @{ Expression = { $_.Status -ne 'OK' } }, FriendlyName |
+        Format-Table @{ Label = 'Output device'; Expression = { $_.FriendlyName } },
+                     @{ Label = 'Active'; Expression = { $_.Status -eq 'OK' } } -AutoSize
+    return
+}
 
 $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -23,9 +37,11 @@ Get-ChildItem $root -Recurse -File | Unblock-File   # downloaded zips are marked
 
 # Config from template
 $template = Get-Content (Join-Path $root 'config\shairport-sync.conf.in') -Raw
-$config = $template.Replace('@NAME@', $Name).Replace('@PORT@', [string]$Port)
+$deviceValue = $OutputDevice.Trim().Replace('\', '\\').Replace('"', '\"')   # libconfig string escapes
+$config = $template.Replace('@NAME@', $Name).Replace('@PORT@', [string]$Port).Replace('@OUTPUT_DEVICE@', $deviceValue)
 [IO.File]::WriteAllText((Join-Path $root 'config\shairport-sync.conf'), $config)
-Write-Host "Config: name '$Name', port $Port"
+$deviceText = if ($OutputDevice.Trim()) { "'$($OutputDevice.Trim())'" } else { 'Windows default' }
+Write-Host "Config: name '$Name', port $Port, output device $deviceText"
 
 # Firewall: inbound for the programs that listen, Private networks only
 Get-NetFirewallRule -DisplayName 'airplay2-windows *' -ErrorAction SilentlyContinue | Remove-NetFirewallRule

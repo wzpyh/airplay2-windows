@@ -2,6 +2,9 @@
 general = {
   name = "@NAME@";
   port = @PORT@;
-  output_backend = "wasapi";   // default Windows audio device (patches/shairport-sync-windows.patch)
+  output_backend = "wasapi";   // Windows audio output (patches/shairport-sync-windows.patch)
   mdns_backend = "uxmdnsd";    // built-in mDNS responder (UxPlay lib/mdnsd)
+};
+wasapi = {
+  output_device = "@OUTPUT_DEVICE@";   // empty: the Windows default device, followed when it changes
 };

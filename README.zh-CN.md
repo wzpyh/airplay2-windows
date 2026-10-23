@@ -2,7 +2,7 @@
 
 免费的 **Windows AirPlay 2 音频接收端**。基于 [Shairport Sync](https://github.com/mikebrady/shairport-sync)
 和 [NQPTP](https://github.com/mikebrady/nqptp)，跑在 MSYS2/Cygwin 的 POSIX 兼容层上。
-电脑会在 iPhone/iPad/Mac 的 AirPlay 菜单里显示成一个音箱，声音从 Windows 的默认音频设备播出。
+电脑会在 iPhone/iPad/Mac 的 AirPlay 菜单里显示成一个音箱，声音从 Windows 的默认音频设备或你指定的设备播出。
 
 [English](README.md)
 
@@ -47,7 +47,7 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后�
 | 组件 | 在 Windows 上需要的改动 |
 | --- | --- |
 | `nqptp` | 让 `configure` 接受 Cygwin，另修两处（[补丁](patches/nqptp-cygwin.patch)）：共享内存只在 Linux/FreeBSD/macOS 分支里 `mmap`，其他系统上 Shairport Sync 会报 *"The NQPTP service … does not seem to be initialised"*；Cygwin 的 `getifaddrs()` 拿不到网卡 MAC，时钟 ID 改从环境变量 `NQPTP_MAC` 读。 |
-| `shairport-sync` | `--with-os=cygwin`，另加两个后端（[补丁](patches/shairport-sync-windows.patch)）。**`wasapi`**：以共享模式播放到 Windows 默认音频设备，并上报真实的输出延迟（缓冲中的帧数 + 流延迟），Shairport Sync 靠它和 AirPlay 时钟保持同步；当前设备消失时会自动重新打开默认设备。**`uxmdnsd`**：在进程内运行 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`），发布 AirPlay 2 和 AirPlay 1 服务——Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2。 |
+| `shairport-sync` | `--with-os=cygwin`，另加两个后端（[补丁](patches/shairport-sync-windows.patch)）。**`wasapi`**：以共享模式播放，并上报真实的输出延迟（缓冲中的帧数 + 流延迟），Shairport Sync 靠它和 AirPlay 时钟保持同步。默认播放到 Windows 默认音频设备，在 Windows 里切换输出时会跟着切（用 `IMMNotificationClient` 监听设备变化）；也可以用 `output_device` 固定到某个设备，该设备拔掉期间临时改用默认设备。**`uxmdnsd`**：在进程内运行 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`），发布 AirPlay 2 和 AirPlay 1 服务——Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2。 |
 
 发布的 zip 是自包含的：Cygwin/MSYS 运行库 DLL 放在 `usr\bin` 里，整个文件夹就是一个小型 MSYS 根目录，
 不需要再装任何东西。
@@ -61,16 +61,21 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后�
 AirPlay 菜单里显示的名字和端口（7000 被占用时换一个，比如装了 UxPlay），装到
 `C:\Program Files\airplay2-windows` 并启动接收端。然后在手机的 AirPlay 菜单里选这个名字。
 
-安装包没有代码签名，SmartScreen 可能提示"未知发布者"：点*更多信息 → 仍要运行*。升级时名字、端口和音量
-都会保留；卸载在*设置 → 应用*里。静默安装：
-`msiexec /i airplay2-windows-<版本>-x64.msi /qn NAME="客厅电脑" PORT=7000`。
+安装包没有代码签名，SmartScreen 可能提示"未知发布者"：点*更多信息 → 仍要运行*。升级时名字、端口、输出设备和
+音量都会保留；卸载在*设置 → 应用*里。静默安装：
+`msiexec /i airplay2-windows-<版本>-x64.msi /qn NAME="客厅电脑" PORT=7000`（可选 `OUTPUTDEVICE="..."`，见下文）。
 
 **绿色版 zip**（不用安装包）：把 `airplay2-windows-<版本>-x64.zip` 解压到一个固定的位置，在该文件夹里
 **以管理员身份**打开 PowerShell，运行
-`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"`（可选参数 `-Port`）。
+`powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"`（可选参数 `-Port`、`-OutputDevice`）。
 `install.ps1` 会生成 `config\shairport-sync.conf`、添加防火墙规则，并注册计划任务 `airplay2-windows`：
-开机以 SYSTEM 身份启动（不用登录），接收端退出时自动重启。日志在 `logs\`。要改名字或端口就重新运行它；
+开机以 SYSTEM 身份启动（不用登录），接收端退出时自动重启。日志在 `logs\`。要改名字、端口或输出设备就重新运行它；
 卸载用管理员身份运行 `uninstall.ps1`。MSI 内部调用的也是这两个脚本。
+
+**输出设备**：默认播放到 Windows 的默认输出设备，你在 Windows 里切换输出（比如任务栏的声音菜单）时会跟着切，
+播放中也一样。想不管默认设备是谁都固定用某个设备，就在安装向导里填它的名字，或者给 `install.ps1` 传
+`-OutputDevice`。名字按 Windows 显示的写，比如 `Headphones (AMD Audio Device)`，也可以只写其中能唯一区分的一部分；
+`.\install.ps1 -ListOutputDevices` 会列出所有设备。该设备拔掉或禁用期间改用默认设备，插回来后自动切回去。
 
 ## 从源码编译
 
@@ -94,7 +99,7 @@ bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/ai
 | --- | --- |
 | 手机上看不到 | 网络必须是 Private；iPhone 会缓存列表，关开一次 Wi-Fi；如果有别的程序独占了 UDP 5353，广播会发不出去，看 `logs\shairport-sync.log`。 |
 | 能看到、能连上，但没声音 | 看 `logs\shairport-sync.log`。如果报 NQPTP "not initialised"，说明 nqptp 补丁没打上。 |
-| 声音从别的设备出来 | 它总是播放到 Windows 的默认输出设备。当前设备消失时，下一段音频会自动改用新的默认设备。 |
+| 声音从别的设备出来 | 它跟随 Windows 默认输出设备，或者你设置的 `output_device`。`logs\shairport-sync.log` 里会写正在用哪个设备（`wasapi: playing to "..."`）；如果 `output_device` 一个都没匹配上，会列出当前可用的设备。 |
 | 7000 端口被占用（比如装了 UxPlay） | 重新运行 `install.ps1 -Port 7010`，两个可以并存。 |
 
 日志里的 `Can't create a device ID -- no valid MAC address can be found` 不影响使用：

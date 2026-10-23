@@ -3,8 +3,9 @@
     wix build installer/airplay2-windows.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
       -d BundleDir=<absolute path of dist/airplay2-windows> -d Version=0.3.0 -o airplay2-windows.msi
   The MSI copies the files and then runs install.ps1 (config, firewall rules, boot task) with the
-  name and port entered in the setup dialog; uninstalling runs uninstall.ps1.
+  name, port and output device entered in the setup dialog; uninstalling runs uninstall.ps1.
   Silent install: msiexec /i airplay2-windows.msi /qn NAME="Living Room PC" PORT=7000
+    (optional OUTPUTDEVICE="Headphones (AMD Audio Device)"; empty = the Windows default device)
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
   <Package Name="airplay2-windows" Manufacturer="airplay2-windows" Version="$(Version)"
@@ -17,15 +18,21 @@
     <!-- the receiver runs hidden in session 0, there is no window for Restart Manager to close -->
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="Disable" />
 
-    <!-- Name and port: command line, else the values of the previous install, else defaults -->
+    <!-- Name, port and output device: command line, else the values of the previous install, else defaults -->
     <Property Id="PREVNAME">
       <RegistrySearch Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Name" Type="raw" />
     </Property>
     <Property Id="PREVPORT">
       <RegistrySearch Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Port" Type="raw" />
     </Property>
+    <Property Id="PREVOUTPUTDEVICE">
+      <RegistrySearch Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="OutputDevice" Type="raw" />
+    </Property>
     <SetProperty Id="NAME" Action="SetNameFromPrevious" Value="[PREVNAME]" After="AppSearch" Sequence="both" Condition="NOT NAME AND PREVNAME" />
     <SetProperty Id="PORT" Action="SetPortFromPrevious" Value="[PREVPORT]" After="AppSearch" Sequence="both" Condition="NOT PORT AND PREVPORT" />
+    <!-- the device may be empty on purpose: after the full-UI dialog, an empty field means "default device" -->
+    <SetProperty Id="OUTPUTDEVICE" Action="SetOutputDeviceFromPreviousUI" Value="[PREVOUTPUTDEVICE]" After="AppSearch" Sequence="ui" Condition="NOT OUTPUTDEVICE AND PREVOUTPUTDEVICE" />
+    <SetProperty Id="OUTPUTDEVICE" Action="SetOutputDeviceFromPrevious" Value="[PREVOUTPUTDEVICE]" After="AppSearch" Sequence="execute" Condition="NOT OUTPUTDEVICE AND PREVOUTPUTDEVICE AND UILevel &lt;&gt; 5" />
     <SetProperty Id="NAME" Action="SetNameDefault" Value="[ComputerName] AirPlay" Before="CostInitialize" Sequence="both" Condition="NOT NAME" />
     <SetProperty Id="PORT" Action="SetPortDefault" Value="7000" Before="CostInitialize" Sequence="both" Condition="NOT PORT" />
 
@@ -38,6 +45,7 @@
       <Component Id="Settings">
         <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Name" Type="string" Value="[NAME]" KeyPath="yes" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Port" Type="string" Value="[PORT]" />
+        <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="OutputDevice" Type="string" Value="[OUTPUTDEVICE]" />
       </Component>
     </ComponentGroup>
 
@@ -47,7 +55,7 @@
 
     <!-- install.ps1 / uninstall.ps1 as SYSTEM; output goes to the MSI log -->
     <SetProperty Id="RunInstall" Before="RunInstall" Sequence="execute"
-                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Name &quot;[NAME]&quot; -Port [PORT]" />
+                 Value="&quot;[System64Folder]WindowsPowerShell\v1.0\powershell.exe&quot; -NoProfile -NonInteractive -ExecutionPolicy Bypass -File &quot;[INSTALLFOLDER]install.ps1&quot; -Name &quot;[NAME]&quot; -Port [PORT] -OutputDevice &quot;[OUTPUTDEVICE]&quot;" />
     <CustomAction Id="RunInstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="no" Return="check" />
     <!-- full uninstall also deletes what the receiver wrote (config, volume, logs); an upgrade keeps it -->
@@ -85,7 +93,10 @@
         <Control Id="NameEdit" Type="Edit" X="20" Y="74" Width="320" Height="18" Property="NAME" Text="{63}" />
         <Control Id="PortLabel" Type="Text" X="20" Y="104" Width="320" Height="12" Text="&amp;Port (change it if another AirPlay receiver such as UxPlay already uses 7000):" />
         <Control Id="PortEdit" Type="Edit" X="20" Y="118" Width="60" Height="18" Property="PORT" Text="{5}" />
-        <Control Id="Note" Type="Text" X="20" Y="150" Width="320" Height="40" NoPrefix="yes" Text="The receiver starts at boot without logging in. Your home network must be set to Private in Windows (Settings, Network, Network profile type)." />
+        <Control Id="DeviceLabel" Type="Text" X="20" Y="146" Width="320" Height="12" Text="&amp;Output device (leave empty to use the Windows default device):" />
+        <Control Id="DeviceEdit" Type="Edit" X="20" Y="160" Width="320" Height="18" Property="OUTPUTDEVICE" Text="{255}" />
+        <Control Id="DeviceHint" Type="Text" X="20" Y="181" Width="320" Height="12" NoPrefix="yes" Text="Its name as Windows shows it, or a part of it, e.g. Headphones (AMD Audio Device)" />
+        <Control Id="Note" Type="Text" X="20" Y="200" Width="320" Height="28" NoPrefix="yes" Text="The receiver starts at boot without logging in. Your home network must be set to Private in Windows (Settings, Network, Network profile type)." />
         <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
         <Control Id="Back" Type="PushButton" X="180" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)" />
         <Control Id="Next" Type="PushButton" X="236" Y="243" Width="56" Height="17" Default="yes" Text="!(loc.WixUINext)" />

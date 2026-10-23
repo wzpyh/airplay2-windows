@@ -56,20 +56,22 @@ index 2ad6e1b..0aac105 100644
                           uint32_t default_channel_set); // look in "general" and in the named stanza
 diff --git a/audio_wasapi.c b/audio_wasapi.c
 new file mode 100644
-index 0000000..75bcaf5
+index 0000000..e3389ab
 --- /dev/null
 +++ b/audio_wasapi.c
-@@ -0,0 +1,300 @@
+@@ -0,0 +1,537 @@
 +/*
 + * WASAPI (Windows) output backend for Shairport Sync, for Cygwin/MSYS2 builds.
 + * Local patch from airplay2-windows -- not part of upstream Shairport Sync.
 + *
-+ * Plays to the default render device in shared mode. The engine converts the stream to the
-+ * device mix format (AUTOCONVERTPCM), so only S16_LE/S32_LE stereo at 44.1/48 kHz is offered.
++ * Plays in shared mode to the device named by wasapi.output_device, or to the default render
++ * device if that is not set or not active. The engine converts the stream to the device mix
++ * format (AUTOCONVERTPCM), so only S16_LE/S32_LE stereo at 44.1/48 kHz is offered.
 + * delay() reports frames still queued in the endpoint buffer plus the stream latency, which is
 + * what Shairport Sync needs to keep output in sync with the AirPlay (PTP) clock.
-+ * If the device goes away (unplugged, default changed), the next play() reopens the current
-+ * default device.
++ * Device changes (default changed, device plugged in or unplugged) are reported by an
++ * IMMNotificationClient; the next play() then moves the stream to the device that should be used
++ * now. If the device goes away, the next play() reopens the right one too.
 + *
 + * Permission is hereby granted, free of charge, to any person obtaining a copy of this software
 + * and associated documentation files (the "Software"), to deal in the Software without
@@ -82,10 +84,13 @@ index 0000000..75bcaf5
 +
 +#include "audio.h"
 +#include "common.h"
++#include <ctype.h>
 +#include <errno.h>
 +#include <pthread.h>
 +#include <string.h>
++#include <strings.h>
 +#include <unistd.h>
++#include <wchar.h>
 +
 +#define COBJMACROS
 +#include <windows.h>
@@ -101,6 +106,13 @@ index 0000000..75bcaf5
 +            0x03, 0xB2);
 +DEFINE_GUID(sps_IID_IAudioRenderClient, 0xF294ACFC, 0x3146, 0x4483, 0xA7, 0xBF, 0xAD, 0xDC, 0xA7,
 +            0xC2, 0x60, 0xE2);
++DEFINE_GUID(sps_IID_IUnknown, 0x00000000, 0x0000, 0x0000, 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
++            0x46);
++DEFINE_GUID(sps_IID_IMMNotificationClient, 0x7991EEC9, 0x7E89, 0x4D85, 0x83, 0x90, 0x6C, 0x70, 0x3C,
++            0xEC, 0x60, 0xC0);
++// PKEY_Device_FriendlyName, e.g. "Headphones (AMD Audio Device)"
++static const PROPERTYKEY sps_PKEY_Device_FriendlyName = {
++    {0xA45C254E, 0xDF1C, 0x4EFD, {0x80, 0x20, 0x67, 0xD1, 0x46, 0xA8, 0x50, 0xE0}}, 14};
 +
 +#define DEVICE_BUFFER_SECONDS 1.0
 +
@@ -112,11 +124,188 @@ index 0000000..75bcaf5
 +static int running = 0;
 +static int32_t current_encoded_output_format = 0;
 +static unsigned int frame_bytes = 0;
++static char *preferred_device = NULL; // wasapi.output_device, NULL = the default device
++static LPWSTR current_device_id = NULL; // endpoint id of the open stream
++static volatile LONG device_check_needed = 0; // set by the notification client
++static IMMDeviceEnumerator *notify_enumerator = NULL;
 +
 +static void com_init_thread(void) {
 +  // COINIT_MULTITHREADED: the objects are shared by the player and the RTSP threads.
 +  // Returns S_FALSE if already initialised on this thread, which is fine.
 +  CoInitializeEx(NULL, COINIT_MULTITHREADED);
++}
++
++// Endpoint notifications arrive on a thread of the audio service. They only raise a flag: the
++// audio client must not be touched from inside the callback.
++static HRESULT STDMETHODCALLTYPE nc_query_interface(IMMNotificationClient *this, REFIID riid,
++                                                    void **object) {
++  if (IsEqualIID(riid, &sps_IID_IUnknown) || IsEqualIID(riid, &sps_IID_IMMNotificationClient)) {
++    *object = this;
++    return S_OK;
++  }
++  *object = NULL;
++  return E_NOINTERFACE;
++}
++static ULONG STDMETHODCALLTYPE nc_add_ref(__attribute__((unused)) IMMNotificationClient *this) {
++  return 1; // static object
++}
++static ULONG STDMETHODCALLTYPE nc_release(__attribute__((unused)) IMMNotificationClient *this) {
++  return 1;
++}
++static HRESULT STDMETHODCALLTYPE nc_device_state_changed(
++    __attribute__((unused)) IMMNotificationClient *this, __attribute__((unused)) LPCWSTR id,
++    __attribute__((unused)) DWORD state) {
++  InterlockedExchange(&device_check_needed, 1);
++  return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE nc_device_added(__attribute__((unused)) IMMNotificationClient *this,
++                                                 __attribute__((unused)) LPCWSTR id) {
++  InterlockedExchange(&device_check_needed, 1);
++  return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE nc_device_removed(
++    __attribute__((unused)) IMMNotificationClient *this, __attribute__((unused)) LPCWSTR id) {
++  InterlockedExchange(&device_check_needed, 1);
++  return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE nc_default_device_changed(
++    __attribute__((unused)) IMMNotificationClient *this, EDataFlow flow, ERole role,
++    __attribute__((unused)) LPCWSTR id) {
++  if (flow == eRender && role == eConsole)
++    InterlockedExchange(&device_check_needed, 1);
++  return S_OK;
++}
++static HRESULT STDMETHODCALLTYPE nc_property_value_changed(
++    __attribute__((unused)) IMMNotificationClient *this, __attribute__((unused)) LPCWSTR id,
++    __attribute__((unused)) const PROPERTYKEY key) {
++  return S_OK; // fires constantly (volume, levels); not interesting
++}
++static IMMNotificationClientVtbl notify_vtbl = {
++    .QueryInterface = nc_query_interface,
++    .AddRef = nc_add_ref,
++    .Release = nc_release,
++    .OnDeviceStateChanged = nc_device_state_changed,
++    .OnDeviceAdded = nc_device_added,
++    .OnDeviceRemoved = nc_device_removed,
++    .OnDefaultDeviceChanged = nc_default_device_changed,
++    .OnPropertyValueChanged = nc_property_value_changed};
++static IMMNotificationClient notify_client = {.lpVtbl = &notify_vtbl};
++
++// UTF-8 copy of a wide string; free() it.
++static char *utf8_from_wide(LPCWSTR wide) {
++  int n = WideCharToMultiByte(CP_UTF8, 0, wide, -1, NULL, 0, NULL, NULL);
++  char *s = n > 0 ? malloc(n) : NULL;
++  if (s)
++    WideCharToMultiByte(CP_UTF8, 0, wide, -1, s, n, NULL, NULL);
++  return s;
++}
++
++// Friendly name of an endpoint, UTF-8; free() it. NULL if it has none.
++static char *device_name(IMMDevice *device) {
++  char *name = NULL;
++  IPropertyStore *props = NULL;
++  if (SUCCEEDED(IMMDevice_OpenPropertyStore(device, STGM_READ, &props))) {
++    PROPVARIANT value;
++    PropVariantInit(&value);
++    if (SUCCEEDED(IPropertyStore_GetValue(props, &sps_PKEY_Device_FriendlyName, &value)) &&
++        value.vt == VT_LPWSTR)
++      name = utf8_from_wide(value.pwszVal);
++    PropVariantClear(&value);
++    IPropertyStore_Release(props);
++  }
++  return name;
++}
++
++// Case-insensitive (ASCII) substring test.
++static int contains_nocase(const char *haystack, const char *needle) {
++  size_t n = strlen(needle);
++  for (; *haystack; haystack++) {
++    size_t i = 0;
++    while (i < n && haystack[i] &&
++           tolower((unsigned char)haystack[i]) == tolower((unsigned char)needle[i]))
++      i++;
++    if (i == n)
++      return 1;
++  }
++  return n == 0;
++}
++
++// The active endpoint that wasapi.output_device names: an exact endpoint id or friendly name
++// first, else the first friendly name that contains it. NULL if none matches; then the list of
++// active devices is logged so the right name can be put in the configuration.
++static IMMDevice *find_preferred_device(IMMDeviceEnumerator *enumerator) {
++  IMMDeviceCollection *devices = NULL;
++  IMMDevice *exact = NULL, *partial = NULL;
++  UINT count = 0;
++  if (FAILED(IMMDeviceEnumerator_EnumAudioEndpoints(enumerator, eRender, DEVICE_STATE_ACTIVE,
++                                                    &devices)))
++    return NULL;
++  IMMDeviceCollection_GetCount(devices, &count);
++  for (UINT i = 0; i < count && exact == NULL; i++) {
++    IMMDevice *device = NULL;
++    if (FAILED(IMMDeviceCollection_Item(devices, i, &device)))
++      continue;
++    LPWSTR wide_id = NULL;
++    char *id = NULL;
++    if (SUCCEEDED(IMMDevice_GetId(device, &wide_id))) {
++      id = utf8_from_wide(wide_id);
++      CoTaskMemFree(wide_id);
++    }
++    char *name = device_name(device);
++    if ((id && strcasecmp(id, preferred_device) == 0) ||
++        (name && strcasecmp(name, preferred_device) == 0)) {
++      exact = device;
++    } else if (partial == NULL && name && contains_nocase(name, preferred_device)) {
++      partial = device;
++    } else {
++      IMMDevice_Release(device);
++    }
++    free(id);
++    free(name);
++  }
++  if (exact && partial)
++    IMMDevice_Release(partial);
++  IMMDevice *found = exact ? exact : partial;
++  if (found == NULL) {
++    warn("wasapi: no active output device matches output_device \"%s\"; using the default device. "
++         "Active devices:",
++         preferred_device);
++    for (UINT i = 0; i < count; i++) {
++      IMMDevice *device = NULL;
++      if (FAILED(IMMDeviceCollection_Item(devices, i, &device)))
++        continue;
++      char *name = device_name(device);
++      warn("wasapi:   \"%s\"", name ? name : "(no name)");
++      free(name);
++      IMMDevice_Release(device);
++    }
++  }
++  IMMDeviceCollection_Release(devices);
++  return found;
++}
++
++// The device the stream should be on right now: the configured one if it is active, else the
++// default render device. NULL if there is no output device at all.
++static IMMDevice *find_output_device(void) {
++  IMMDeviceEnumerator *enumerator = NULL;
++  IMMDevice *device = NULL;
++  HRESULT hr = CoCreateInstance(&sps_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
++                                &sps_IID_IMMDeviceEnumerator, (void **)&enumerator);
++  if (FAILED(hr)) {
++    warn("wasapi: cannot enumerate audio devices (hr=0x%08lx).", (unsigned long)hr);
++    return NULL;
++  }
++  if (preferred_device)
++    device = find_preferred_device(enumerator);
++  if (device == NULL) {
++    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device);
++    if (FAILED(hr)) {
++      warn("wasapi: no default audio output device (hr=0x%08lx).", (unsigned long)hr);
++      device = NULL;
++    }
++  }
++  IMMDeviceEnumerator_Release(enumerator);
++  return device;
 +}
 +
 +static void release_device(void) {
@@ -129,13 +318,18 @@ index 0000000..75bcaf5
 +    IAudioClient_Release(client);
 +    client = NULL;
 +  }
++  if (current_device_id) {
++    CoTaskMemFree(current_device_id);
++    current_device_id = NULL;
++  }
 +  running = 0;
 +}
 +
-+// Open the default render device for the current output format. Caller holds wasapi_mutex.
++// Open the output device for the current output format. Caller holds wasapi_mutex.
 +static int open_device(void) {
 +  com_init_thread();
 +  release_device();
++  InterlockedExchange(&device_check_needed, 0);
 +  if (current_encoded_output_format == 0)
 +    return -1;
 +
@@ -145,21 +339,21 @@ index 0000000..75bcaf5
 +  unsigned int bits = format == SPS_FORMAT_S32_LE ? 32 : 16;
 +  frame_bytes = channels * bits / 8;
 +
-+  IMMDeviceEnumerator *enumerator = NULL;
-+  IMMDevice *device = NULL;
-+  HRESULT hr = CoCreateInstance(&sps_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
-+                                &sps_IID_IMMDeviceEnumerator, (void **)&enumerator);
-+  if (SUCCEEDED(hr))
-+    hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(enumerator, eRender, eConsole, &device);
-+  if (SUCCEEDED(hr))
-+    hr = IMMDevice_Activate(device, &sps_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&client);
-+  if (device)
-+    IMMDevice_Release(device);
-+  if (enumerator)
-+    IMMDeviceEnumerator_Release(enumerator);
++  IMMDevice *device = find_output_device();
++  if (device == NULL)
++    return -1;
++  char *name = device_name(device);
++  HRESULT hr = IMMDevice_GetId(device, &current_device_id);
++  if (FAILED(hr))
++    current_device_id = NULL;
++  hr = IMMDevice_Activate(device, &sps_IID_IAudioClient, CLSCTX_ALL, NULL, (void **)&client);
++  IMMDevice_Release(device);
 +  if (FAILED(hr)) {
-+    warn("wasapi: no default audio output device (hr=0x%08lx).", (unsigned long)hr);
++    warn("wasapi: cannot open output device \"%s\" (hr=0x%08lx).", name ? name : "?",
++         (unsigned long)hr);
++    free(name);
 +    client = NULL;
++    release_device();
 +    return -1;
 +  }
 +
@@ -181,16 +375,37 @@ index 0000000..75bcaf5
 +  if (SUCCEEDED(hr))
 +    hr = IAudioClient_GetService(client, &sps_IID_IAudioRenderClient, (void **)&render);
 +  if (FAILED(hr)) {
-+    warn("wasapi: could not open the output stream (hr=0x%08lx).", (unsigned long)hr);
++    warn("wasapi: could not open the output stream on \"%s\" (hr=0x%08lx).", name ? name : "?",
++         (unsigned long)hr);
++    free(name);
 +    release_device();
 +    return -1;
 +  }
 +  REFERENCE_TIME latency = 0;
 +  IAudioClient_GetStreamLatency(client, &latency);
 +  latency_frames = (UINT32)((uint64_t)latency * rate / 10000000);
-+  debug(1, "wasapi: opened default device, %s, buffer %u frames, stream latency %u frames.",
-+        short_format_description(current_encoded_output_format), buffer_frames, latency_frames);
++  inform("wasapi: playing to \"%s\", %s, buffer %u frames, stream latency %u frames.",
++         name ? name : "?", short_format_description(current_encoded_output_format),
++         buffer_frames, latency_frames);
++  free(name);
 +  return 0;
++}
++
++// After a device notification: move the stream if it is no longer on the device it should be
++// on. Caller holds wasapi_mutex and has an open stream.
++static void follow_device_change(void) {
++  IMMDevice *device = find_output_device();
++  LPWSTR id = NULL;
++  int same = 0;
++  if (device) {
++    if (SUCCEEDED(IMMDevice_GetId(device, &id))) {
++      same = current_device_id && wcscmp(id, current_device_id) == 0;
++      CoTaskMemFree(id);
++    }
++    IMMDevice_Release(device);
++  }
++  if (!same)
++    open_device();
 +}
 +
 +static int check_configuration(unsigned int channels, unsigned int rate, unsigned int format) {
@@ -226,11 +441,28 @@ index 0000000..75bcaf5
 +  config.audio_backend_latency_offset = 0;
 +  parse_audio_options("wasapi", (1 << SPS_FORMAT_S16_LE) | (1 << SPS_FORMAT_S32_LE),
 +                      (1 << SPS_RATE_44100) | (1 << SPS_RATE_48000), (1 << 2));
++  const char *str;
++  if (config.cfg != NULL && config_lookup_non_empty_string(config.cfg, "wasapi.output_device", &str)) {
++    preferred_device = strdup(str);
++    inform("wasapi: output_device is \"%s\".", preferred_device);
++  }
 +  com_init_thread();
++  HRESULT hr = CoCreateInstance(&sps_CLSID_MMDeviceEnumerator, NULL, CLSCTX_ALL,
++                                &sps_IID_IMMDeviceEnumerator, (void **)&notify_enumerator);
++  if (SUCCEEDED(hr))
++    hr = IMMDeviceEnumerator_RegisterEndpointNotificationCallback(notify_enumerator,
++                                                                  &notify_client);
++  if (FAILED(hr))
++    warn("wasapi: cannot watch for audio device changes (hr=0x%08lx).", (unsigned long)hr);
 +  return 0;
 +}
 +
 +static void deinit(void) {
++  if (notify_enumerator) {
++    IMMDeviceEnumerator_UnregisterEndpointNotificationCallback(notify_enumerator, &notify_client);
++    IMMDeviceEnumerator_Release(notify_enumerator);
++    notify_enumerator = NULL;
++  }
 +  pthread_mutex_lock(&wasapi_mutex);
 +  release_device();
 +  pthread_mutex_unlock(&wasapi_mutex);
@@ -241,6 +473,8 @@ index 0000000..75bcaf5
 +                __attribute__((unused)) uint64_t playtime) {
 +  pthread_mutex_lock(&wasapi_mutex);
 +  com_init_thread();
++  if (client != NULL && InterlockedExchange(&device_check_needed, 0))
++    follow_device_change();
 +  if (client == NULL && open_device() != 0) {
 +    pthread_mutex_unlock(&wasapi_mutex);
 +    return 0; // drop the audio; the next block retries the device
@@ -250,7 +484,7 @@ index 0000000..75bcaf5
 +    UINT32 padding = 0;
 +    HRESULT hr = IAudioClient_GetCurrentPadding(client, &padding);
 +    if (hr == AUDCLNT_E_DEVICE_INVALIDATED) {
-+      warn("wasapi: the output device went away; reopening the default device.");
++      warn("wasapi: the output device went away; reopening.");
 +      if (open_device() != 0)
 +        break;
 +      continue;
@@ -315,7 +549,10 @@ index 0000000..75bcaf5
 +static void stop(void) { flush(); }
 +
 +static void help(void) {
-+  printf("    The wasapi backend plays to the default Windows audio device and has no options.\n");
++  printf("    The wasapi backend plays to the Windows default audio device and follows it when it\n"
++         "    changes. To always use one device, set output_device in the \"wasapi\" section to its\n"
++         "    name as Windows shows it, e.g. \"Headphones (AMD Audio Device)\", or a part of the\n"
++         "    name; when that device is not active the default device is used.\n");
 +}
 +
 +// Remember the AirPlay volume across restarts in the file named by SPS_VOLUME_FILE.
