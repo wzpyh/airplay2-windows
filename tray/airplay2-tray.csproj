@@ -20,6 +20,9 @@
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <PublishSingleFile>true</PublishSingleFile>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- no package references; .NET 10's package pruning fails restore on the GitHub runner
+         ("Failed to load prune package data", MSB4181) -->
+    <RestoreEnablePackagePruning>false</RestoreEnablePackagePruning>
     <!-- FileDescription: the app name Windows shows on its media controls -->
     <AssemblyTitle>AirPlay</AssemblyTitle>
     <ApplicationIcon>airplay.ico</ApplicationIcon>
