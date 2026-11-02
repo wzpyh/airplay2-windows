@@ -46,7 +46,7 @@ jobs:
           dotnet restore tray -v normal
           if ($LASTEXITCODE) {
             # NuGet keeps the real reason in the assets file
-            (Get-Content tray/obj/project.assets.json -Raw | ConvertFrom-Json).logs | Format-List | Out-String -Width 300
+            (Get-Content tray/obj/project.assets.json -Raw | ConvertFrom-Json -AsHashtable).logs | ConvertTo-Json -Depth 5
             dotnet --info
             exit 1
           }
