@@ -5,3 +5,5 @@ logs/
 config/shairport-sync.conf
 *.exe
 config/volume.txt
+tray/bin/
+tray/obj/

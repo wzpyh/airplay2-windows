@@ -1,0 +1,228 @@
+--- a/configure.ac
++++ b/configure.ac
+@@ -408,7 +408,13 @@
+   AC_MSG_WARN([MQTT needs Avahi for remote control functionality. With the current configuration settings, only metadata publishing will be supported.])
+ fi
+ 
+-if test "x$with_mpris_interface" = "xyes" || test "x$with_dbus_interface" = "xyes" || test "x$with_mqtt_client" = "xyes" ; then
++AC_ARG_WITH(udp-remote, [AS_HELP_STRING([--with-udp-remote],[local UDP remote-control port (Windows)])])
++if test "x$with_udp_remote" = "xyes" ; then
++  AC_DEFINE([CONFIG_UDP_REMOTE], 1, [local UDP remote-control port])
++fi
++AM_CONDITIONAL([USE_UDP_REMOTE], [test "x$with_udp_remote" = "xyes"])
++
++if test "x$with_mpris_interface" = "xyes" || test "x$with_dbus_interface" = "xyes" || test "x$with_mqtt_client" = "xyes" || test "x$with_udp_remote" = "xyes" ; then
+   REQUESTED_EXTENDED_METADATA_AND_REMOTE_CONTROL_SUPPORT=1
+   AC_DEFINE([CONFIG_METADATA_HUB], 1, [Needed by the compiler.])
+   AC_DEFINE([CONFIG_DACP_CLIENT], 1, [DACP client needed for extended metadata support.])
+--- a/Makefile.am
++++ b/Makefile.am
+@@ -381,3 +381,7 @@
+ install-exec-hook: install-config-files
+ 
+ endif
++
++if USE_UDP_REMOTE
++shairport_sync_SOURCES += remote/udp_remote.c
++endif
+--- a/shairport.c
++++ b/shairport.c
+@@ -3694,6 +3694,9 @@
+ 
+ #ifdef CONFIG_METADATA
+   metadata_init(); // create the metadata pipe if necessary
++#ifdef CONFIG_UDP_REMOTE
++  { extern void udp_remote_start(void); udp_remote_start(); }
++#endif
+ #endif
+ 
+ #ifdef CONFIG_METADATA_HUB
+--- a/rtsp.c
++++ b/rtsp.c
+@@ -2058,6 +2058,12 @@
+         // we are not going to load the plist here because we don't wamt
+         // to incur the memory and processing cost. So we'll just send it to the
+         // metadata handling code and it can be dealt with there.
++#ifdef CONFIG_UDP_REMOTE
++        {
++          extern void udp_remote_note_command(const char *data, size_t len);
++          udp_remote_note_command(req->content, req->contentlength);
++        }
++#endif
+         send_metadata('ssnc', 'copl', req->content, req->contentlength, req,
+                       1); // COmmand PList (and release 'req' afterwards)
+ #ifdef CONFIG_METADATA_HUB
+--- /dev/null
++++ b/remote/udp_remote.c
+@@ -0,0 +1,171 @@
++// Local remote-control port for Windows, where there is no D-Bus, MPRIS or MQTT.
++//
++// Listens on 127.0.0.1:<SPS_REMOTE_UDP_PORT, default 5557> for one-word text datagrams:
++//
++//   play pause toggle stop next prev volup voldown
++//       forwarded to the current AirPlay source via remote_simple_command()
++//   status
++//       replies to the sender, in the metadata socket format ("ssnc" + code + data, large items
++//       as "ssnc" "chnk" pieces): "pend" if no AirPlay 2 source is connected, else "pbeg" followed
++//       by the latest now-playing information the source sent (its updateMRNowPlayingInfo
++//       commands). A client that starts while something is already playing uses it to catch up.
++//
++// Only loopback is bound, so only programs on this computer can use it.
++
++#include <arpa/inet.h>
++#include <netinet/in.h>
++#include <pthread.h>
++#include <stdint.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/socket.h>
++#include <unistd.h>
++
++#include "player.h"
++#include "remote.h"
++#include "rtsp.h"
++
++static const struct {
++  const char *word;
++  simple_command_t command;
++} udp_remote_words[] = {
++    {"play", rcsc_play},          {"pause", rcsc_pause},         {"toggle", rcsc_play_pause},
++    {"playpause", rcsc_play_pause}, {"stop", rcsc_stop},         {"next", rcsc_next_item},
++    {"prev", rcsc_previous_item}, {"previous", rcsc_previous_item}, {"volup", rcsc_volume_up},
++    {"voldown", rcsc_volume_down},
++};
++
++// latest updateMRNowPlayingInfo commands: the last full one ("replace") and the last partial one
++// ("update", e.g. the playback rate) received after it
++static pthread_mutex_t np_lock = PTHREAD_MUTEX_INITIALIZER;
++static char *np_replace, *np_update;
++static size_t np_replace_len, np_update_len;
++
++static int contains(const char *data, size_t len, const char *s) {
++  size_t n = strlen(s);
++  for (size_t i = 0; i + n <= len; i++)
++    if (memcmp(data + i, s, n) == 0)
++      return 1;
++  return 0;
++}
++
++// called from handle_command() with every POST /command plist an AirPlay 2 source sends
++void udp_remote_note_command(const char *data, size_t len) {
++  if (data == NULL || len == 0 || !contains(data, len, "updateMRNowPlayingInfo"))
++    return;
++  char *copy = malloc(len);
++  if (copy == NULL)
++    return;
++  memcpy(copy, data, len);
++  pthread_mutex_lock(&np_lock);
++  if (contains(data, len, "replace")) {
++    free(np_replace);
++    np_replace = copy;
++    np_replace_len = len;
++    free(np_update); // older partial updates are superseded
++    np_update = NULL;
++    np_update_len = 0;
++  } else {
++    free(np_update);
++    np_update = copy;
++    np_update_len = len;
++  }
++  pthread_mutex_unlock(&np_lock);
++}
++
++static void put32(unsigned char *p, uint32_t v) {
++  v = htonl(v);
++  memcpy(p, &v, 4);
++}
++
++// sends one item in the metadata socket format, in "chnk" pieces if it is large
++static void reply_item(int fd, const struct sockaddr_in *to, const char *code, const char *data,
++                       size_t len) {
++  enum { piece = 60000 };
++  static unsigned char buf[piece + 24];
++  if (len + 8 <= piece) {
++    memcpy(buf, "ssnc", 4);
++    memcpy(buf + 4, code, 4);
++    if (len)
++      memcpy(buf + 8, data, len);
++    sendto(fd, buf, len + 8, 0, (const struct sockaddr *)to, sizeof(*to));
++    return;
++  }
++  uint32_t total = (uint32_t)((len + piece - 1) / piece);
++  for (uint32_t ix = 0; ix < total; ix++) {
++    size_t off = (size_t)ix * piece, n = len - off < piece ? len - off : piece;
++    memcpy(buf, "ssncchnk", 8);
++    put32(buf + 8, ix);
++    put32(buf + 12, total);
++    memcpy(buf + 16, "ssnc", 4);
++    memcpy(buf + 20, code, 4);
++    memcpy(buf + 24, data + off, n);
++    sendto(fd, buf, n + 24, 0, (const struct sockaddr *)to, sizeof(*to));
++  }
++}
++
++static void reply_status(int fd, const struct sockaddr_in *to) {
++  int active;
++  pthread_rwlock_rdlock(&principal_conn_lock);
++  active = principal_conn != NULL && principal_conn->airplay_type == ap_2;
++  pthread_rwlock_unlock(&principal_conn_lock);
++  if (!active) {
++    reply_item(fd, to, "pend", NULL, 0);
++    return;
++  }
++  reply_item(fd, to, "pbeg", NULL, 0);
++  pthread_mutex_lock(&np_lock);
++  if (np_replace)
++    reply_item(fd, to, "copl", np_replace, np_replace_len);
++  if (np_update)
++    reply_item(fd, to, "copl", np_update, np_update_len);
++  pthread_mutex_unlock(&np_lock);
++}
++
++static void *udp_remote_thread(__attribute__((unused)) void *arg) {
++  const char *port_env = getenv("SPS_REMOTE_UDP_PORT");
++  int port = port_env ? atoi(port_env) : 5557;
++  if (port <= 0)
++    return NULL;
++  int fd = socket(AF_INET, SOCK_DGRAM, 0);
++  if (fd < 0)
++    return NULL;
++  struct sockaddr_in addr;
++  memset(&addr, 0, sizeof(addr));
++  addr.sin_family = AF_INET;
++  addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
++  addr.sin_port = htons(port);
++  if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
++    warn("udp remote: cannot bind 127.0.0.1:%d.", port);
++    close(fd);
++    return NULL;
++  }
++  debug(1, "udp remote: listening on 127.0.0.1:%d.", port);
++  char buf[64];
++  for (;;) {
++    struct sockaddr_in from;
++    socklen_t fromlen = sizeof(from);
++    ssize_t n = recvfrom(fd, buf, sizeof(buf) - 1, 0, (struct sockaddr *)&from, &fromlen);
++    if (n <= 0)
++      continue;
++    buf[n] = 0;
++    while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r' || buf[n - 1] == ' '))
++      buf[--n] = 0;
++    if (strcmp(buf, "status") == 0) {
++      reply_status(fd, &from);
++      continue;
++    }
++    for (size_t i = 0; i < sizeof(udp_remote_words) / sizeof(udp_remote_words[0]); i++)
++      if (strcmp(buf, udp_remote_words[i].word) == 0) {
++        remote_simple_command(udp_remote_words[i].command);
++        break;
++      }
++  }
++  return NULL;
++}
++
++void udp_remote_start(void) {
++  pthread_t t;
++  if (pthread_create(&t, NULL, udp_remote_thread, NULL) == 0)
++    pthread_detach(t);
++}

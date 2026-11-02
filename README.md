@@ -4,7 +4,9 @@ A free **AirPlay 2 audio receiver for Windows**, built from
 [Shairport Sync](https://github.com/mikebrady/shairport-sync) and
 [NQPTP](https://github.com/mikebrady/nqptp) running on the MSYS2/Cygwin POSIX layer.
 Your PC shows up as a speaker in the iPhone/iPad/Mac AirPlay menu and plays through
-the Windows default audio device, or a device you pick.
+the Windows default audio device, or a device you pick. A tray icon shows what is playing and
+lets you skip tracks from the PC: from its menu, the keyboard's media keys or Windows' own media
+controls.
 
 [中文说明](README.zh-CN.md)
 
@@ -29,6 +31,7 @@ that missing half, so your PC behaves like an AirPlay 2 speaker (HomePod-style):
 | Video apps' sound (tested: Bilibili, YouTube) | Silent in some apps (e.g. Bilibili) | ✅ in sync with the picture |
 | AirPlay 2 buffered audio + PTP timing | ❌ | ✅ |
 | Remembers volume across restarts | ❌ | ✅ (`config\volume.txt`) |
+| Now playing + play/pause/next/previous from the PC | ❌ | ✅ tray icon, media keys, Windows media controls |
 | Runs at boot without logging in | Do it yourself | ✅ (scheduled task as SYSTEM) |
 | Runtime dependencies | GStreamer, Bonjour (≤1.73) | None (one folder, ~16 MB) |
 
@@ -37,7 +40,7 @@ They complement each other and can be installed side by side: give this one anot
 
 ## How it works
 
-Two programs run:
+Two programs run as a service, and a tray app in your session:
 
 ```
                      ┌──────────── shairport-sync.exe ────────────┐
@@ -46,12 +49,16 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 service ──▶ wasapi audio back
                      └────────────────────▲───────────────────────┘
                                           │ shared memory (clock)
          PTP (UDP 319/320) ◀──▶ nqptp.exe ┘
+
+shairport-sync ──now playing, UDP 127.0.0.1:5555──▶ airplay2-tray.exe ──▶ tray menu, media-key OSD,
+shairport-sync ◀──play/pause/next/prev, 127.0.0.1:5557──┘                  Windows media controls
 ```
 
 | Part | What was needed on Windows |
 | --- | --- |
 | `nqptp` | Builds as-is once `configure` accepts Cygwin, plus two fixes ([patch](patches/nqptp-cygwin.patch)): the shared-memory block was only `mmap`ed for Linux/FreeBSD/macOS (on any other OS Shairport Sync reports *"The NQPTP service … does not seem to be initialised"*), and the clock identity MAC comes from `NQPTP_MAC` because Cygwin's `getifaddrs()` has no link-layer entries. |
-| `shairport-sync` | `--with-os=cygwin` plus two new backends ([patch](patches/shairport-sync-windows.patch)). **`wasapi`** plays in shared mode and reports the real output delay (queued frames + stream latency), which Shairport Sync uses to stay in sync with the AirPlay clock. It plays to the default Windows audio device and follows it when you switch the output in Windows (an `IMMNotificationClient` watches for changes), or always to the device set in `output_device`, falling back to the default while that one is unplugged. **`uxmdnsd`** advertises the AirPlay 2 and AirPlay 1 services with UxPlay's minimal mDNS responder (`lib/mdnsd`) running in-process — there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise AirPlay 2. |
+| `shairport-sync` | `--with-os=cygwin` plus two new backends ([patch](patches/shairport-sync-windows.patch)). **`wasapi`** plays in shared mode and reports the real output delay (queued frames + stream latency), which Shairport Sync uses to stay in sync with the AirPlay clock. It plays to the default Windows audio device and follows it when you switch the output in Windows (an `IMMNotificationClient` watches for changes), or always to the device set in `output_device`, falling back to the default while that one is unplugged. **`uxmdnsd`** advertises the AirPlay 2 and AirPlay 1 services with UxPlay's minimal mDNS responder (`lib/mdnsd`) running in-process — there is no Avahi on Windows, and the bundled tinysvcmdns cannot advertise AirPlay 2. A second [patch](patches/shairport-sync-remote.patch) adds a loopback **UDP remote-control port** (Shairport Sync's own remote control needs D-Bus, MPRIS or MQTT): it passes play/pause/next/previous to the source as AirPlay 2 `sendMediaRemoteCommand`s, and answers `status` with the latest now-playing information, so the tray can catch up when it starts mid-song. |
+| `airplay2-tray.exe` | A small .NET 10 WinForms app ([tray/](tray/)). It reads the now-playing messages the phone sends (title, artist, album, artwork, play state; AirPlay 2 delivers them as binary plists) from Shairport Sync's metadata socket and feeds the tray menu, an on-screen display for the media keys, and Windows' **System Media Transport Controls**. Those are called through raw COM, which keeps the exe at ~270 KB instead of shipping the 25 MB WinRT projection. |
 
 The release zip is self-contained: the Cygwin/MSYS runtime DLLs ship in `usr\bin`, so the folder
 is its own little MSYS root and nothing else needs to be installed.
@@ -60,7 +67,9 @@ is its own little MSYS root and nothing else needs to be installed.
 
 Requirements: Windows 10/11 x64, and your home network set to **Private** in Windows
 (Settings → Network → your Wi-Fi/Ethernet → Network profile type; the firewall rules only open
-the Private profile).
+the Private profile). The tray app also needs the
+[.NET 10 Desktop Runtime](https://dotnet.microsoft.com/download/dotnet/10.0) (x64); without it the
+receiver works as before, and Windows offers the download when the tray app starts.
 
 Download `airplay2-windows-<version>-x64.msi` from [Releases](../../releases) and run it. Setup
 asks for the name shown in the AirPlay menu and the port (change it from 7000 if something else,
@@ -73,10 +82,26 @@ it from *Settings → Apps*. Unattended install:
 `msiexec /i airplay2-windows-<version>-x64.msi /qn NAME="Living Room PC" PORT=7000`
 (optional `OUTPUTDEVICE="..."`, see below).
 
+**Tray app.** The MSI starts `airplay2-tray.exe` after installing and at every logon. While a
+phone is playing:
+
+- the tooltip and the menu (left or right click) show the track and artwork. *Previous*,
+  *Play/Pause* and *Next* keep the menu open for 15 s, so you can skip several tracks in a row;
+- middle-clicking the icon skips to the next track;
+- the keyboard's media keys control the phone, and a small display in the bottom-right corner
+  shows what is now playing;
+- the track also appears in Windows' media controls (Quick Settings, the volume flyout, the lock
+  screen), with working buttons.
+
+*Media keys always control AirPlay* (in the menu) sends the media keys to the phone even while
+another player on the PC is active. The tray app puts an "AirPlay" shortcut in your Start menu:
+Windows takes the name and icon on its media controls from it.
+
 **Portable zip** (no installer): unzip `airplay2-windows-<version>-x64.zip` somewhere permanent,
 open PowerShell **as Administrator** in that folder and run
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "Living Room PC"` (options `-Port`,
 `-OutputDevice`).
+Start `airplay2-tray.exe` yourself for the tray app (or put a shortcut in your Startup folder).
 `install.ps1` writes `config\shairport-sync.conf`, adds firewall rules, and registers a scheduled
 task `airplay2-windows` that starts at boot as SYSTEM (no logon needed) and restarts the receiver
 if it ever exits. Logs are in `logs\`. Re-run it to change the name, port or output device; run `uninstall.ps1`
@@ -94,6 +119,7 @@ disabled, the default device is used, and the receiver switches back when it ret
 Needs [MSYS2](https://www.msys2.org/). In an *MSYS2 MSYS* shell (not UCRT64/MINGW64):
 
 ```sh
+dotnet publish tray -c Release -o dist/tray   # the tray app: .NET 10 SDK, any shell, first
 bash scripts/fetch.sh     # pinned source tarballs, sha256-checked (any machine with internet)
 bash scripts/build.sh     # installs pacman packages, builds everything, stages dist/airplay2-windows/
 ```
@@ -114,6 +140,8 @@ same way by GitHub Actions (`.github/workflows/release.yml`).
 | Listed, connects, no sound | `logs/shairport-sync.log`. If NQPTP is "not initialised", the nqptp patch is missing. |
 | Plays on the wrong device | It follows the Windows default output device, or the `output_device` you set. `logs\shairport-sync.log` names the device it plays to (`wasapi: playing to "..."`) and, if your `output_device` matches nothing, lists the active devices. |
 | Port 7000 already in use (e.g. UxPlay) | Re-run `install.ps1 -Port 7010`. Both can run side by side. |
+| Tray menu says it cannot read metadata | Another program holds UDP 127.0.0.1:5555 (one tray per PC). |
+| Media card says "Unknown app" | The Start menu shortcut "AirPlay" is missing or was created after playback began: restart the tray app. |
 
 `Can't create a device ID -- no valid MAC address can be found` in the log is harmless:
 Shairport Sync then derives the device ID from the service name.

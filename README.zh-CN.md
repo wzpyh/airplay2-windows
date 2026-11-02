@@ -3,6 +3,7 @@
 免费的 **Windows AirPlay 2 音频接收端**。基于 [Shairport Sync](https://github.com/mikebrady/shairport-sync)
 和 [NQPTP](https://github.com/mikebrady/nqptp)，跑在 MSYS2/Cygwin 的 POSIX 兼容层上。
 电脑会在 iPhone/iPad/Mac 的 AirPlay 菜单里显示成一个音箱，声音从 Windows 的默认音频设备或你指定的设备播出。
+托盘图标显示正在播放的歌，还能在电脑上切歌：托盘菜单、键盘媒体键、Windows 自带的媒体控件都可以。
 
 [English](README.md)
 
@@ -25,6 +26,7 @@ Windows 上最有名的免费接收端 [UxPlay](https://github.com/FDH2/UxPlay) 
 | 视频 App 的声音（实测 B 站、YouTube） | 部分 App 没声音（如 B 站） | ✅ 且与画面同步 |
 | AirPlay 2 缓冲音频 + PTP 时钟 | ❌ | ✅ |
 | 重启后记住音量 | ❌ | ✅（`config\volume.txt`） |
+| 在电脑上看曲目、播放/暂停/切歌 | ❌ | ✅ 托盘图标、媒体键、Windows 媒体控件 |
 | 开机自启、不用登录 | 需要自己配置 | ✅（以 SYSTEM 身份运行的计划任务） |
 | 运行时依赖 | GStreamer、Bonjour（1.73 及以前） | 无（一个文件夹，约 16 MB） |
 
@@ -33,7 +35,7 @@ Windows 上最有名的免费接收端 [UxPlay](https://github.com/FDH2/UxPlay) 
 
 ## 原理
 
-只跑两个程序：
+后台服务跑两个程序，另有一个托盘程序跑在你的登录会话里：
 
 ```
                      ┌──────────── shairport-sync.exe ────────────┐
@@ -42,12 +44,16 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后�
                      └────────────────────▲───────────────────────┘
                                           │ 共享内存（时钟）
           PTP（UDP 319/320）◀──▶ nqptp.exe ┘
+
+shairport-sync ──曲目信息，UDP 127.0.0.1:5555──▶ airplay2-tray.exe ──▶ 托盘菜单、媒体键浮层、
+shairport-sync ◀──播放/暂停/切歌，127.0.0.1:5557──┘                  Windows 媒体控件
 ```
 
 | 组件 | 在 Windows 上需要的改动 |
 | --- | --- |
 | `nqptp` | 让 `configure` 接受 Cygwin，另修两处（[补丁](patches/nqptp-cygwin.patch)）：共享内存只在 Linux/FreeBSD/macOS 分支里 `mmap`，其他系统上 Shairport Sync 会报 *"The NQPTP service … does not seem to be initialised"*；Cygwin 的 `getifaddrs()` 拿不到网卡 MAC，时钟 ID 改从环境变量 `NQPTP_MAC` 读。 |
-| `shairport-sync` | `--with-os=cygwin`，另加两个后端（[补丁](patches/shairport-sync-windows.patch)）。**`wasapi`**：以共享模式播放，并上报真实的输出延迟（缓冲中的帧数 + 流延迟），Shairport Sync 靠它和 AirPlay 时钟保持同步。默认播放到 Windows 默认音频设备，在 Windows 里切换输出时会跟着切（用 `IMMNotificationClient` 监听设备变化）；也可以用 `output_device` 固定到某个设备，该设备拔掉期间临时改用默认设备。**`uxmdnsd`**：在进程内运行 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`），发布 AirPlay 2 和 AirPlay 1 服务——Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2。 |
+| `shairport-sync` | `--with-os=cygwin`，另加两个后端（[补丁](patches/shairport-sync-windows.patch)）。**`wasapi`**：以共享模式播放，并上报真实的输出延迟（缓冲中的帧数 + 流延迟），Shairport Sync 靠它和 AirPlay 时钟保持同步。默认播放到 Windows 默认音频设备，在 Windows 里切换输出时会跟着切（用 `IMMNotificationClient` 监听设备变化）；也可以用 `output_device` 固定到某个设备，该设备拔掉期间临时改用默认设备。**`uxmdnsd`**：在进程内运行 UxPlay 的精简 mDNS 响应器（`lib/mdnsd`），发布 AirPlay 2 和 AirPlay 1 服务——Windows 上没有 Avahi，自带的 tinysvcmdns 又发布不了 AirPlay 2。另一个[补丁](patches/shairport-sync-remote.patch)加了一个只监听本机的 **UDP 遥控端口**（Shairport Sync 自带的遥控要 D-Bus、MPRIS 或 MQTT）：把播放/暂停/切歌以 AirPlay 2 `sendMediaRemoteCommand` 发给手机，并用 `status` 回报最近的曲目信息，托盘在歌放到一半时启动也能马上显示。 |
+| `airplay2-tray.exe` | 一个很小的 .NET 10 WinForms 程序（[tray/](tray/)）。从 Shairport Sync 的 metadata 端口读取手机发来的曲目信息（歌名、歌手、专辑、封面、播放状态；AirPlay 2 用二进制 plist 传），提供给托盘菜单、媒体键浮层和 Windows 的**系统媒体传输控件（SMTC）**。SMTC 通过原生 COM 直接调用，exe 只有约 270 KB，不用带 25 MB 的 WinRT 投影库。 |
 
 发布的 zip 是自包含的：Cygwin/MSYS 运行库 DLL 放在 `usr\bin` 里，整个文件夹就是一个小型 MSYS 根目录，
 不需要再装任何东西。
@@ -56,6 +62,8 @@ iPhone ──AirPlay 2──▶│ AirPlay 2 服务 ──▶ wasapi 音频后�
 
 环境要求：Windows 10/11 x64；Windows 里家庭网络设为**专用网络（Private）**
 （设置 → 网络 → 你的 Wi-Fi/以太网 → 网络配置文件类型），防火墙规则只对 Private 放行。
+托盘程序还需要 [.NET 10 桌面运行时](https://dotnet.microsoft.com/download/dotnet/10.0)（x64）；没装的话接收端照常工作，
+托盘程序启动时 Windows 会提示下载。
 
 从 [Releases](../../releases) 下载 `airplay2-windows-<版本>-x64.msi` 双击安装。安装向导会让你填
 AirPlay 菜单里显示的名字和端口（7000 被占用时换一个，比如装了 UxPlay），装到
@@ -65,9 +73,21 @@ AirPlay 菜单里显示的名字和端口（7000 被占用时换一个，比如�
 音量都会保留；卸载在*设置 → 应用*里。静默安装：
 `msiexec /i airplay2-windows-<版本>-x64.msi /qn NAME="客厅电脑" PORT=7000`（可选 `OUTPUTDEVICE="..."`，见下文）。
 
+**托盘程序**：MSI 装完会启动 `airplay2-tray.exe`，以后每次登录自动启动。手机在播放时：
+
+- 鼠标悬停显示歌名；左键或右键打开菜单，顶部是封面和曲目。点*上一首*、*播放/暂停*、*下一首*后菜单会保持
+  15 秒，方便连续切歌；
+- 中键点托盘图标直接切下一首；
+- 键盘媒体键控制手机，右下角弹出小浮层显示正在放的歌；
+- 曲目也会出现在 Windows 的媒体控件里（快速设置、音量浮层、锁屏），上面的按钮可以直接用。
+
+菜单里的*媒体键只控制 AirPlay* 打开后，即使电脑上有别的播放器在放，媒体键也只发给手机。托盘程序会在开始菜单里放一个
+"AirPlay" 快捷方式，Windows 媒体控件上显示的名字和图标就取自它。
+
 **绿色版 zip**（不用安装包）：把 `airplay2-windows-<版本>-x64.zip` 解压到一个固定的位置，在该文件夹里
 **以管理员身份**打开 PowerShell，运行
 `powershell -ExecutionPolicy Bypass -File .\install.ps1 -Name "客厅电脑"`（可选参数 `-Port`、`-OutputDevice`）。
+托盘程序要自己运行 `airplay2-tray.exe`（或者把快捷方式放进"启动"文件夹）。
 `install.ps1` 会生成 `config\shairport-sync.conf`、添加防火墙规则，并注册计划任务 `airplay2-windows`：
 开机以 SYSTEM 身份启动（不用登录），接收端退出时自动重启。日志在 `logs\`。要改名字、端口或输出设备就重新运行它；
 卸载用管理员身份运行 `uninstall.ps1`。MSI 内部调用的也是这两个脚本。
@@ -82,6 +102,7 @@ AirPlay 菜单里显示的名字和端口（7000 被占用时换一个，比如�
 需要 [MSYS2](https://www.msys2.org/)。在 *MSYS2 MSYS* 终端里运行（不是 UCRT64/MINGW64）：
 
 ```sh
+dotnet publish tray -c Release -o dist/tray   # 先编译托盘程序：.NET 10 SDK，任何终端都行
 bash scripts/fetch.sh     # 下载锁定版本的源码包并校验 sha256（任何能上网的机器都行）
 bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/airplay2-windows/ 生成绿色包
 ```
@@ -101,6 +122,8 @@ bash scripts/build.sh     # 装 pacman 依赖、编译全部组件、在 dist/ai
 | 能看到、能连上，但没声音 | 看 `logs\shairport-sync.log`。如果报 NQPTP "not initialised"，说明 nqptp 补丁没打上。 |
 | 声音从别的设备出来 | 它跟随 Windows 默认输出设备，或者你设置的 `output_device`。`logs\shairport-sync.log` 里会写正在用哪个设备（`wasapi: playing to "..."`）；如果 `output_device` 一个都没匹配上，会列出当前可用的设备。 |
 | 7000 端口被占用（比如装了 UxPlay） | 重新运行 `install.ps1 -Port 7010`，两个可以并存。 |
+| 托盘菜单提示读不到曲目信息 | 有别的程序占了 UDP 127.0.0.1:5555（每台电脑只能跑一个托盘）。 |
+| 媒体控件显示 "Unknown app" | 开始菜单里的 "AirPlay" 快捷方式缺失，或者是在播放开始后才建的：重启一次托盘程序。 |
 
 日志里的 `Can't create a device ID -- no valid MAC address can be found` 不影响使用：
 Shairport Sync 会改用服务名生成设备 ID。

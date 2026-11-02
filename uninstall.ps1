@@ -17,7 +17,17 @@ Get-NetFirewallRule -DisplayName 'airplay2-windows *' -ErrorAction SilentlyConti
 Get-Process nqptp, shairport-sync -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -and $_.Path.StartsWith($bin, [StringComparison]::OrdinalIgnoreCase) } |
     Stop-Process -Force -ErrorAction SilentlyContinue
+# the tray app, in every user's session
+Get-Process airplay2-tray -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -and $_.Path.StartsWith($PSScriptRoot, [StringComparison]::OrdinalIgnoreCase) } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
 if ($Purge) {
+    # the tray puts an "AirPlay" shortcut in each user's Start menu (Windows needs it to name the
+    # media controls); remove the ones that point into this folder
+    $shell = New-Object -ComObject WScript.Shell
+    Get-ChildItem 'C:\Users\*\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\AirPlay.lnk' -ErrorAction SilentlyContinue |
+        Where-Object { $shell.CreateShortcut($_.FullName).TargetPath.StartsWith($PSScriptRoot, [StringComparison]::OrdinalIgnoreCase) } |
+        Remove-Item -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 1   # let the stopped programs release their log files
     foreach ($p in 'config\shairport-sync.conf', 'config\volume.txt', 'logs', 'dev', 'tmp') {
         Remove-Item (Join-Path $PSScriptRoot $p) -Recurse -Force -ErrorAction SilentlyContinue

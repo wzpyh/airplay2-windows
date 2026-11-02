@@ -67,7 +67,7 @@ unpack nqptp.tar.gz nqptp
 (cd nqptp && patch -p1 < "$root/patches/nqptp-cygwin.patch" && autoreconf -fi && ./configure --prefix=$prefix \
   && make -j"$jobs" && cp nqptp.exe $prefix/bin/) > nqptp.log 2>&1 || { log nqptp.log; exit 1; }
 
-step "shairport-sync (AirPlay 2, WASAPI output, built-in mDNS)"
+step "shairport-sync (AirPlay 2, WASAPI output, built-in mDNS, remote control)"
 unpack uxplay.tar.gz uxplay
 unpack shairport-sync.tar.gz shairport-sync
 # UxPlay's minimal mDNS responder for the uxmdnsd backend (mdnsd.c includes "../compat.h")
@@ -75,9 +75,12 @@ mkdir -p shairport-sync/uxplay/mdnsd
 cp uxplay/lib/mdnsd/mdnsd.c uxplay/lib/mdnsd/mdnsd.h shairport-sync/uxplay/mdnsd/
 cp uxplay/lib/compat.h uxplay/lib/threads.h uxplay/lib/sockets.h shairport-sync/uxplay/
 (cd shairport-sync/uxplay && patch -p2 < "$root/patches/uxplay-mdnsd.patch") > uxplay-mdnsd.log 2>&1 || { log uxplay-mdnsd.log; exit 1; }
-(cd shairport-sync && patch -p1 < "$root/patches/shairport-sync-windows.patch" && autoreconf -fi \
+# shairport-sync-remote.patch: loopback UDP port for remote control and status, used by the tray
+# app (Windows has no D-Bus or MPRIS); metadata goes to the tray over loopback UDP as well
+(cd shairport-sync && patch -p1 < "$root/patches/shairport-sync-windows.patch" \
+  && patch -p1 < "$root/patches/shairport-sync-remote.patch" && autoreconf -fi \
   && ./configure --prefix=$prefix --sysconfdir=$prefix/etc --with-os=cygwin --with-airplay-2 --with-ssl=openssl \
-       --with-wasapi --with-uxmdnsd \
+       --with-wasapi --with-uxmdnsd --with-metadata --with-metadata-multicast --with-udp-remote \
   && make -j"$jobs" && cp shairport-sync.exe $prefix/bin/) > shairport-sync.log 2>&1 || { log shairport-sync.log; exit 1; }
 
 step "bundle"

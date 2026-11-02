@@ -8,3 +8,12 @@ general = {
 wasapi = {
   output_device = "@OUTPUT_DEVICE@";   // empty: the Windows default device, followed when it changes
 };
+// Now-playing information for the tray app (airplay2-tray.exe), sent over loopback UDP only.
+// The tray sends play/pause/next/previous back on 127.0.0.1:5557 (SPS_REMOTE_UDP_PORT).
+metadata = {
+  enabled = "yes";
+  include_cover_art = "no";        // artwork arrives inside the AirPlay 2 now-playing messages
+  socket_address = "127.0.0.1";
+  socket_port = 5555;
+  socket_msglength = 65000;
+};

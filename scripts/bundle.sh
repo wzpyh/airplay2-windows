@@ -5,6 +5,7 @@
 # resolves to <bundle>/dev/shm and no MSYS2 installation is needed on the target machine):
 #
 #   install.ps1  uninstall.ps1  README.md  README.zh-CN.md  LICENSE  THIRD_PARTY.txt
+#   airplay2-tray.exe   tray app (now playing, remote control), built by .NET: see below
 #   config/shairport-sync.conf.in
 #   runtime/service.ps1
 #   usr/bin/      nqptp.exe shairport-sync.exe + DLLs
@@ -28,6 +29,15 @@ touch "$out/dev/shm/.keep" "$out/tmp/.keep" "$out/logs/.keep"
 for exe in nqptp shairport-sync; do
   cp "/usr/local/bin/$exe.exe" "$out/usr/bin/"
 done
+
+# Tray app: a .NET program, built outside MSYS2 beforehand (the CI workflow does it):
+#   dotnet publish tray -c Release -o dist/tray
+tray="$root/dist/tray/airplay2-tray.exe"
+if [ ! -f "$tray" ]; then
+  echo "error: $tray is missing -- build it first: dotnet publish tray -c Release -o dist/tray" >&2
+  exit 1
+fi
+cp "$tray" "$out/"
 
 # DLLs the programs need
 dlls=$(for exe in nqptp shairport-sync; do ldd "/usr/local/bin/$exe.exe"; done \

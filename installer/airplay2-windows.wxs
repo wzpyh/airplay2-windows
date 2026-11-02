@@ -47,6 +47,11 @@
         <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="Port" Type="string" Value="[PORT]" />
         <RegistryValue Root="HKLM" Key="SOFTWARE\airplay2-windows" Name="OutputDevice" Type="string" Value="[OUTPUTDEVICE]" />
       </Component>
+      <!-- the tray app (now playing, remote control) starts in every user's session at logon -->
+      <Component Id="TrayAutostart">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Microsoft\Windows\CurrentVersion\Run" Name="airplay2-tray"
+                       Type="string" Value="&quot;[INSTALLFOLDER]airplay2-tray.exe&quot;" KeyPath="yes" />
+      </Component>
     </ComponentGroup>
 
     <Feature Id="Main">
@@ -64,9 +69,14 @@
     <SetProperty Id="PURGE" Value="-Purge" After="InstallInitialize" Sequence="execute" Condition="NOT UPGRADINGPRODUCTCODE" />
     <CustomAction Id="RunUninstall" BinaryRef="Wix4UtilCA_X64" DllEntry="WixQuietExec"
                   Execute="deferred" Impersonate="no" Return="ignore" />
+    <!-- start the tray app for the installing user right away (later logons use the Run key);
+         immediate + impersonated, so it runs in the user's session, not as SYSTEM -->
+    <CustomAction Id="LaunchTray" Directory="INSTALLFOLDER" ExeCommand="&quot;[INSTALLFOLDER]airplay2-tray.exe&quot;"
+                  Execute="immediate" Impersonate="yes" Return="asyncNoWait" />
     <InstallExecuteSequence>
       <Custom Action="RunUninstall" Before="RemoveFiles" Condition="REMOVE~=&quot;ALL&quot;" />
       <Custom Action="RunInstall" Before="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="LaunchTray" After="InstallFinalize" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <UI Id="AirPlayUI">
