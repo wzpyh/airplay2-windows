@@ -42,15 +42,11 @@ jobs:
 
       - name: Tray app
         shell: pwsh
+        # MSBuild reads environment variables as properties, so $env:VERSION (v0.5.0, ci-abc1234)
+        # would become the assembly version and fail the restore (NU1105): pass a numeric one
         run: |
-          dotnet restore tray -v normal
-          if ($LASTEXITCODE) {
-            # NuGet keeps the real reason in the assets file
-            (Get-Content tray/obj/project.assets.json -Raw | ConvertFrom-Json -AsHashtable).logs | ConvertTo-Json -Depth 5
-            dotnet --info
-            exit 1
-          }
-          dotnet publish tray -c Release -o dist/tray --self-contained false --no-restore
+          $v = if ($env:VERSION -match '^v(\d+\.\d+\.\d+)$') { $Matches[1] } else { "0.0.$env:GITHUB_RUN_NUMBER" }
+          dotnet publish tray -c Release -o dist/tray --self-contained false -p:Version=$v
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Fetch sources
