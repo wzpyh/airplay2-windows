@@ -44,7 +44,12 @@ jobs:
         shell: pwsh
         run: |
           dotnet restore tray -v normal
-          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if ($LASTEXITCODE) {
+            # NuGet keeps the real reason in the assets file
+            (Get-Content tray/obj/project.assets.json -Raw | ConvertFrom-Json).logs | Format-List | Out-String -Width 300
+            dotnet --info
+            exit 1
+          }
           dotnet publish tray -c Release -o dist/tray --self-contained false --no-restore
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
