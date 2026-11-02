@@ -43,7 +43,9 @@ jobs:
       - name: Tray app
         shell: pwsh
         run: |
-          dotnet publish tray -c Release -o dist/tray --self-contained false
+          dotnet restore tray -v normal
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          dotnet publish tray -c Release -o dist/tray --self-contained false --no-restore
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
       - name: Fetch sources
